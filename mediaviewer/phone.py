@@ -53,10 +53,16 @@ class FolderDevice:
             if progress:
                 progress(i)
 
-    def delete(self, rels: list[str]) -> dict[str, str | None]:
+    def delete(self, rels: list[str], hashes: dict[str, str] | None = None) -> dict[str, str | None]:
         res = {}
         for rel in rels:
             try:
+                expected = (hashes or {}).get(rel)
+                if expected:
+                    h = hashlib.sha1((self.root / rel).read_bytes()).hexdigest()
+                    if h != expected:
+                        res[rel] = "содержимое не совпало с облаком — не тронут"
+                        continue
                 (self.root / rel).unlink()
                 res[rel] = None
             except OSError as e:
@@ -101,24 +107,23 @@ class WpdDevice:
 
     def list_files(self, progress=None, cache: dict | None = None,
                    folder_filter=None) -> list[tuple[str, int, float, float | None]]:
-        """Обход телефона. cache: {id объекта: свойства} с прошлых подключений, дополняется на месте.
+        """Обход телефона. Свойства всегда читаются с устройства заново: ID объектов на iPhone
+        меняются после удалений, поэтому никакого кэша между вызовами нет (параметр cache игнорируется).
         folder_filter(rel) -> bool: в какие папки заходить (None — во все)."""
-        cache = cache if cache is not None else {}
         with self._lock:
             c = self._conn()
             out: list[tuple[str, int, float, float | None]] = []
             ids: dict[str, tuple[str, int, str]] = {}
+            props: dict[str, dict] = {}
             storages = c.properties(c.children("DEVICE"))
             frontier = [(sid, r["name"]) for sid, r in storages.items()]
             while frontier:
                 kids = [(k, fid, prefix) for fid, prefix in frontier for k in c.children(fid)]
-                unknown = [k for k, _, _ in kids if k not in cache]
-                if unknown:
-                    total = len(unknown)
-                    cache.update(c.properties(unknown, (lambda n: progress(n, total)) if progress else None))
+                total = len(kids)
+                props.update(c.properties([k for k, _, _ in kids], (lambda n: progress(n, total)) if progress else None))
                 nxt = []
                 for k, fid, prefix in kids:
-                    r = cache.get(k)
+                    r = props.get(k)
                     if not r:
                         continue
                     rel = f"{prefix}/{r['name']}"
@@ -139,43 +144,86 @@ class WpdDevice:
         if any(r not in self._ids for r in rels):
             self.list_files()
 
+    def _resolve(self, c, rel: str, size: int | None) -> str | None:
+        """Найти объект заново по пути (имена папок и файла) — без запомненных ID."""
+        parts = rel.split("/")
+        parent = "DEVICE"
+        for i, part in enumerate(parts):
+            kids = c.properties(c.children(parent))
+            last = i == len(parts) - 1
+            match = [k for k, r in kids.items() if r["name"] == part and r["folder"] != last
+                     and (not last or size is None or r["size"] == size)]
+            if len(match) != 1:
+                return None
+            parent = match[0]
+        return parent
+
+    def _checked_id(self, c, rel: str) -> tuple[str | None, str | None]:
+        """ID объекта, который ТОЧНО является этим файлом (имя и размер сверены с устройством прямо сейчас)."""
+        name = rel.rsplit("/", 1)[-1]
+        entry = self._ids.get(rel)
+        size = entry[1] if entry else None
+        oid = entry[0] if entry else None
+        live = c.one(oid) if oid else None
+        if not live or live["name"] != name or (size is not None and live["size"] != size):
+            oid = self._resolve(c, rel, size)
+            live = c.one(oid) if oid else None
+        if not oid or not live or live["name"] != name or (size is not None and live["size"] != size):
+            return None, "файл на телефоне не найден или изменился — не тронут"
+        if entry:
+            self._ids[rel] = (oid, entry[1], entry[2])
+        return oid, None
+
     def fetch(self, rels: list[str], dest_root: Path, progress=None) -> None:
         self._ensure_ids(rels)
         with self._lock:
             c = self._conn()
             for i, rel in enumerate(rels, 1):
-                if rel not in self._ids:
-                    raise FileNotFoundError(f"{rel}: файла нет на телефоне")
-                oid, size, _ = self._ids[rel]
+                oid, err = self._checked_id(c, rel)
+                if err:
+                    raise FileNotFoundError(f"{rel}: {err}")
                 dest = dest_root / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                c.read_file(oid, size, dest)
+                c.read_file(oid, self._ids[rel][1], dest)
                 if progress:
                     progress(i)
 
-    def delete(self, rels: list[str]) -> dict[str, str | None]:
+    def delete(self, rels: list[str], hashes: dict[str, str] | None = None) -> dict[str, str | None]:
+        """Удаление по одному файлу. Перед каждым — сверка имени и размера с устройством, а если известен
+        SHA-1 файла из облака — файл на телефоне читается целиком и сверяется. После — проверка, что файла нет."""
+        from . import wpd
+
         self._ensure_ids(rels)
-        res: dict[str, str | None] = {r: "файла уже нет на телефоне" for r in rels if r not in self._ids}
-        todo = [r for r in rels if r in self._ids]
+        res: dict[str, str | None] = {}
         with self._lock:
-            c = self._conn()
-            for i in range(0, len(todo), 100):
-                chunk = todo[i:i + 100]
+            c = wpd.Connection(self.device_id)  # свежее подключение — без устаревших данных
+            for rel in rels:
+                oid, err = self._checked_id(c, rel)
+                if err:
+                    res[rel] = err
+                    continue
+                expected = (hashes or {}).get(rel)
+                if expected:
+                    try:
+                        actual = c.sha1(oid, self._ids[rel][1])
+                    except Exception as e:  # noqa: BLE001
+                        res[rel] = f"не удалось прочитать файл для сверки — не тронут ({e})"
+                        break  # после сбоя чтения связь с телефоном может быть нарушена — дальше не идём
+                    if actual != expected:
+                        res[rel] = "содержимое не совпало с облаком — не тронут"
+                        continue
+                name = rel.rsplit("/", 1)[-1]
                 try:
-                    c.delete([self._ids[r][0] for r in chunk])
-                except Exception as e:  # noqa: BLE001 — проверим ниже, что реально удалилось
-                    for r in chunk:
-                        res[r] = f"ошибка удаления: {e}"
-            # проверка: что реально исчезло с телефона
-            parents = {self._ids[r][2] for r in todo}
-            present = {k for p in parents for k in c.children(p)}
-        for r in todo:
-            oid = self._ids[r][0]
-            if oid in present:
-                res[r] = res.get(r) or "телефон не дал удалить файл"
-            else:
-                res[r] = None
-                self._ids.pop(r, None)
+                    c.delete([oid])
+                except Exception as e:  # noqa: BLE001
+                    res[rel] = f"ошибка удаления: {e}"
+                    continue
+                after = c.one(oid)
+                if after is not None and after["name"] == name:
+                    res[rel] = "телефон не дал удалить файл"
+                else:
+                    res[rel] = None
+                    self._ids.pop(rel, None)
         return res
 
 
@@ -187,19 +235,12 @@ def phone_db(data_dir: Path, device) -> Path:
 
 
 def list_with_cache(device, db_path: Path, progress=None, folder_filter=None) -> list[tuple[str, int, float, float | None]]:
-    """Список файлов телефона. Свойства объектов кэшируются в БД телефона: на iPhone ID объектов постоянные,
-    а чтение свойств — самая медленная часть (~25–50 мс на файл)."""
+    """Список файлов телефона — всегда свежий. Раньше здесь был кэш «ID объекта → свойства», но на iPhone
+    ID перенумеровываются после удалений, и кэш приводил к удалению не тех файлов. Старый кэш стираем."""
     with sqlite3.connect(db_path, timeout=30) as c:
-        c.execute("CREATE TABLE IF NOT EXISTS objcache(id TEXT PRIMARY KEY, data TEXT)")
-        cache = {r[0]: json.loads(r[1]) for r in c.execute("SELECT id, data FROM objcache")}
-    known = set(cache)
-    lst = device.list_files((lambda n, total: progress(n, total, not known)) if progress else None, cache,
-                            folder_filter)
-    new = [(k, json.dumps(v)) for k, v in cache.items() if k not in known]
-    if new:
-        with sqlite3.connect(db_path, timeout=30) as c:
-            c.executemany("INSERT OR REPLACE INTO objcache(id, data) VALUES(?, ?)", new)
-    return lst
+        c.execute("DROP TABLE IF EXISTS objcache")
+    first = True
+    return device.list_files((lambda n, total: progress(n, total, first)) if progress else None, None, folder_filter)
 
 
 def companions(rel: str, all_rels) -> list[str]:
@@ -232,8 +273,6 @@ class PhoneLibrary(Library):
         d = data_dir / "phones" / device.key
         super().__init__(d / "mirror", data_dir, lib_dir=d)
         (d / "name.txt").write_text(device.name, encoding="utf-8")
-        with self.connect() as c:
-            c.execute("CREATE TABLE IF NOT EXISTS objcache(id TEXT PRIMARY KEY, data TEXT)")
         self.device = device
         self.allow_copy = False  # пользователь разрешил копировать много файлов
         self._sizes: dict[str, int] = {}
@@ -394,7 +433,15 @@ class PhoneLibrary(Library):
                     errors.append(f"{r['path']}: не удалось сохранить копию в Корзину, файл не тронут ({e})")
                     continue
             to_delete.append(r)
-        result = self.device.delete([r["path"] for r in to_delete]) if to_delete else {}
+        hashes = {}
+        for r in to_delete:
+            if r["parent_id"] is not None:
+                continue
+            for cand in (self.root / r["path"], Path(r["match_ref"] or "") if r.get("match_ref") else None):
+                if cand and cand.is_file() and cand.stat().st_size == self._sizes.get(r["path"], -1):
+                    hashes[r["path"]] = self._sha1(cand)
+                    break
+        result = self.device.delete([r["path"] for r in to_delete], hashes) if to_delete else {}
         removed, freed = [], 0
         for r in to_delete:
             err = result.get(r["path"])

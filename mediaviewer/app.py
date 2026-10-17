@@ -169,6 +169,15 @@ def phone_find_start(req: FindReq | None = None):
     return lb.finder.status
 
 
+@app.get("/api/phone-thumb/{mid}")
+def phone_thumb(mid: int):
+    lb = lib()
+    data = lb.finder.thumbs.get(mid) if lb.finder else None
+    if not data:
+        raise HTTPException(404)
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/phone-find")
 def phone_find_status():
     lb = lib()

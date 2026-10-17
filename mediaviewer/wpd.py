@@ -2,7 +2,8 @@
 
 Через Shell (как Проводник) список файлов iPhone читается ~0,1 с на файл — для 30 тыс. снимков это час.
 WPD перечисляет объекты мгновенно, а свойства (имя, размер, дату) отдаёт пакетно ~25 мс на файл.
-ID объектов на iPhone постоянные, поэтому свойства кэшируются: долго только первое подключение.
+ВНИМАНИЕ: ID объектов на iPhone НЕ постоянные — после удалений устройство их перенумеровывает.
+Поэтому ID нельзя запоминать между подключениями, а перед удалением объект всегда сверяется заново.
 """
 from __future__ import annotations
 
@@ -23,6 +24,8 @@ from comtypes.gen import PortableDeviceTypesLib as types  # noqa: E402
 CTX = comtypes.CLSCTX_INPROC_SERVER
 _OBJ = GUID("{EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C}")  # WPD_OBJECT_PROPERTIES_V1
 _RES_DEFAULT = GUID("{E81E79BE-34F0-41BF-B53F-F1A06AE87842}")  # WPD_RESOURCE_DEFAULT
+_RES_THUMB = GUID("{C7C407BA-98FA-46B5-9960-23FEC124CFDE}")  # WPD_RESOURCE_THUMBNAIL
+_RES_ATTR = GUID("{1EB6F604-9278-429F-93CC-5BB8C06656B6}")  # WPD_RESOURCE_ATTRIBUTES_V1
 _DEV = GUID("{26D4979A-E643-4626-9E2B-736DC0C92FDC}")  # WPD_DEVICE_PROPERTIES_V1
 FOLDER_TYPES = {
     str(GUID("{27E2E392-A111-48E0-AB0C-E17705A05F85}")),  # WPD_CONTENT_TYPE_FOLDER
@@ -231,6 +234,15 @@ class Connection:
                     progress(len(out))
         return out
 
+    def one(self, obj_id: str) -> dict | None:
+        """Свойства одного объекта прямо с устройства; None — объекта нет."""
+        try:
+            r = self._row(self.props.GetValues(obj_id, self.keys), PK)
+        except comtypes.COMError:
+            return None
+        r["id"] = obj_id
+        return r
+
     def device_info(self) -> dict:
         keys = self._keys((2, 9, 12), _DEV)  # FIRMWARE, SERIAL, FRIENDLY_NAME
         try:
@@ -245,23 +257,60 @@ class Connection:
                 pass
         return res
 
-    def read_file(self, obj_id: str, size: int, dest) -> None:
-        res = self.content.Transfer()
-        bufsize, stream = res.GetStream(obj_id, _key(_RES_DEFAULT, 0, port), 0, 0)
+    # ВАЖНО: ресурс всегда читается РОВНО до его размера. MTP передаёт данные по одной передаче за раз;
+    # недочитанная (или прочитанная «до ошибки») передача остаётся висеть, и следующие запросы получают
+    # её хвост — чужие байты. Поэтому никаких «первых 64 КБ» и чтения до исключения.
+
+    def resource_size(self, obj_id: str, resource: GUID) -> int | None:
+        try:
+            attrs = self.content.Transfer().GetResourceAttributes(obj_id, _key(resource, 0, port))
+            return int(attrs.GetUnsignedLargeIntegerValue(_key(_RES_ATTR, 2, port)))  # WPD_RESOURCE_ATTRIBUTE_TOTAL_SIZE
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _read_exact(self, obj_id: str, resource: GUID, size: int, sink, allow_eof: bool = False) -> None:
+        bufsize, stream = self.content.Transfer().GetStream(obj_id, _key(resource, 0, port), 0, 0)
         chunk = max(64 * 1024, min(int(bufsize or 0) or 256 * 1024, 1024 * 1024))
         total = 0
-        tmp = dest.with_name(dest.name + ".part")
-        with open(tmp, "wb") as fh:
+        try:
             while total < size:
                 data, n = stream.RemoteRead(min(chunk, size - total))
                 if not n:
                     break
-                fh.write(bytes(data[:n]))
+                sink(bytes(data[:n]))
                 total += n
-        if total != size:
+        finally:
+            del stream
+        if total != size and not (allow_eof and total > 0):
+            raise OSError(f"прочитано {total} из {size} байт")
+
+    def read_file(self, obj_id: str, size: int, dest) -> None:
+        tmp = dest.with_name(dest.name + ".part")
+        try:
+            with open(tmp, "wb") as fh:
+                self._read_exact(obj_id, _RES_DEFAULT, size, fh.write)
+        except Exception:
             tmp.unlink(missing_ok=True)
-            raise OSError(f"скопировано {total} из {size} байт")
+            raise
         tmp.replace(dest)
+
+    def sha1(self, obj_id: str, size: int) -> str:
+        """SHA-1 всего файла на устройстве (читается целиком)."""
+        import hashlib
+
+        h = hashlib.sha1()
+        self._read_exact(obj_id, _RES_DEFAULT, size, h.update)
+        return h.hexdigest()
+
+    def read_thumb(self, obj_id: str) -> bytes:
+        """Миниатюра, которую делает само устройство (у iPhone — JPEG ~160 px). Читается ровно до её размера."""
+        size = self.resource_size(obj_id, _RES_THUMB)
+        if not size or size > 8 * 1024 * 1024:
+            raise OSError("устройство не сообщило размер миниатюры")
+        parts: list[bytes] = []
+        # размер миниатюры устройство сообщает как верхнюю границу; передача честно заканчивается раньше (n == 0)
+        self._read_exact(obj_id, _RES_THUMB, size, parts.append, allow_eof=True)
+        return b"".join(parts)
 
     def delete(self, obj_ids: list[str]) -> None:
         coll = comtypes.client.CreateObject(types.PortableDevicePropVariantCollection, clsctx=CTX,

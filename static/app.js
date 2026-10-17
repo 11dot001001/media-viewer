@@ -378,6 +378,8 @@ function tileHTML(it, o = {}) {
   else if (it.m === 'cloud') b.push(`<span class="bdg mcloud${it.ms ? '' : ' weak'}" title="${it.ms ? 'Есть' : 'Похоже, есть'} в облаке: ${esc(it.mr)}">☁</span>`);
   if (typeof it.ph === 'string') b.push(`<span class="bdg phone" title="Есть на телефоне: ${esc(it.ph)}">${PHONE_ICON}</span>`);
   else if (it.ph === 0) b.push(`<span class="bdg nophone" title="На телефоне не найден">${PHONE_ICON}<i>✕</i></span>`);
+  else if (it.ph === -2) b.push(`<span class="bdg phmis" title="Не удалось прочитать файл с телефона для сверки — разблокируйте iPhone и повторите поиск">${PHONE_ICON}<i>?</i></span>`);
+  else if (it.ph === -1) b.push(`<span class="bdg phmis" title="На телефоне есть файл того же размера и даты, но содержимое другое — его не удалим">${PHONE_ICON}<i>≠</i></span>`);
   if (it.d) b.push(`<span class="bdg dup" title="${it.dx ? 'Есть точная копия' : 'Есть похожий дубликат'}">⧉</span>`);
   for (const c of it.cx || []) b.push(`<span class="bdg cx" title="${c === 'RAW' ? 'Есть RAW-файл с тем же именем' : c === 'LIVE' ? 'Live Photo: есть видео с тем же именем' : 'Связанный файл'}">${c}</span>`);
   if (it.err) b.push(`<span class="bdg err" title="${esc(it.err)}">!</span>`);
@@ -531,7 +533,9 @@ function renderTrash() {
   const checked = all.some(i => i.ph != null);
   if (!checked) S.phoneFilter = 'all';
   S.list = S.phoneFilter === 'found' ? all.filter(i => typeof i.ph === 'string')
-    : S.phoneFilter === 'missing' ? all.filter(i => i.ph === 0) : all;
+    : S.phoneFilter === 'missing' ? all.filter(i => i.ph === 0)
+      : S.phoneFilter === 'mismatch' ? all.filter(i => i.ph === -1)
+        : S.phoneFilter === 'unreadable' ? all.filter(i => i.ph === -2) : all;
   const size = all.reduce((s, i) => s + i.sz, 0);
   const where = S.trashTarget === 'phone'
     ? `Файлы будут <b>удалены с телефона</b>. Через провод они не попадают в «Недавно удалённые», поэтому снимки, которых нет в облаке, перед удалением копируются в <b>Корзину Windows</b>. Снимки, удалённые или сохранённые в облаке, удаляются без копии.`
@@ -548,12 +552,15 @@ function renderTrash() {
     ['all', 'Все', all.length],
     ['found', 'Есть на телефоне', all.filter(i => typeof i.ph === 'string').length],
     ['missing', 'Не найдены', all.filter(i => i.ph === 0).length],
+    ...(all.some(i => i.ph === -1) ? [['mismatch', 'Не совпало', all.filter(i => i.ph === -1).length]] : []),
+    ...(all.some(i => i.ph === -2) ? [['unreadable', 'Не прочитано', all.filter(i => i.ph === -2).length]] : []),
   ].map(([v, l, n]) => `<button data-act="ph-filter" data-v="${v}" class="${S.phoneFilter === v ? 'active' : ''}">${l} <span class="cnt">${n}</span></button>`).join('')}</div>` : '';
   if (!all.length) {
     html += emptyHTML('Корзина отбора пуста', 'Отмечайте ненужные кадры клавишей <kbd>X</kbd> — они соберутся здесь. Удалятся только после подтверждения.');
   } else {
     html += `<div class="trash-bar">${where} Клавиша <kbd>U</kbd> или <kbd>P</kbd> — вернуть выбранные.</div>` + findBarHTML() + phoneSeg +
-      (S.list.length ? daysHTML(S.list, { noSeries: true }) : emptyHTML('Таких файлов нет'));
+      (!S.list.length ? emptyHTML('Таких файлов нет')
+        : S.phoneFilter === 'found' ? pairsHTML(S.list) : daysHTML(S.list, { noSeries: true }));
   }
   el.innerHTML = html;
 }
@@ -1281,7 +1288,7 @@ async function phoneDialog() {
     (roots.length
       ? `<div class="ref-list">${roots.map(r => `<label><input type="checkbox" value="${esc(r.root)}" checked><span title="${esc(r.root)}">${esc(r.root)}</span><small>${r.count}</small></label>`).join('')}</div>`
       : '<p class="note">Пока нет ни одной. Сначала откройте папку Яндекс Диска с фото («Открыть папку…») и дождитесь окончания сканирования — иначе сверять не с чем.</p>') +
-    `<p class="note">В журнале удалений: ${refs.journal}. Снимки, которые уже есть в облаке (тот же размер и дата), с телефона не копируются. Первое подключение iPhone долгое — список файлов читается примерно 15 минут на 30 тысяч файлов; дальше программа его помнит и читает только новые. Держите телефон разблокированным и подключённым.</p>`;
+    `<p class="note">В журнале удалений: ${refs.journal}. Снимки, которые уже есть в облаке (тот же размер и дата), с телефона не копируются. Список файлов iPhone читается долго — примерно 25–30 минут на 30 тысяч файлов. Держите телефон разблокированным и подключённым.</p>`;
   if (!await confirmModal('Сверка телефона с облаком', html, devs.length ? 'Открыть телефон' : 'Закрыть') || !devs.length) return;
   const dev = devs[+($('#mBody input[name=dev]:checked')?.value || 0)];
   const sel = $$('#mBody .ref-list input:checked').map(x => x.value);
@@ -1320,7 +1327,7 @@ async function refsDialog() {
   } catch (e) { toast(esc(e.message), true); }
 }
 
-function findRunning() { return ['connect', 'list', 'match'].includes(S.find.phase); }
+function findRunning() { return ['connect', 'list', 'match', 'verify'].includes(S.find.phase); }
 
 function findBarHTML() {
   const f = S.find;
@@ -1333,12 +1340,37 @@ function findBarHTML() {
     const scope = f.scope === 'months' ? ` Искал в папках за ${plural(f.months.length, 'месяц', 'месяца', 'месяцев')} съёмки этих файлов.` : '';
     const more = f.scope === 'months' && f.found < f.checked
       ? ' <button class="link" data-act="phone-find-all">Искать по всему телефону (долго)</button>' : '';
-    text = `На телефоне «${esc(f.device)}» найдено <b>${f.found}</b> из ${f.checked}.${scope}${more}<br> <span class="bdg phone">${PHONE_ICON}</span> — есть на телефоне, <span class="bdg nophone">${PHONE_ICON}<i>✕</i></span> — не найден.` +
+    const locked = f.unreadable ? ` <span style="color:var(--warn)"><b>${plural(f.unreadable, 'файл', 'файла', 'файлов')} не удалось прочитать с телефона</b> — похоже, iPhone заблокировался. Разблокируйте его, не давайте экрану погаснуть и нажмите «Найти на телефоне» ещё раз.</span>` : '';
+    const mis = f.mismatch ? ` У ${plural(f.mismatch, 'файла', 'файлов', 'файлов')} совпали размер и дата, но не содержимое — их не удалим.` : '';
+    const pairs = f.found ? ' <button class="link" data-act="ph-filter" data-v="found">Проверить пары «облако ↔ iPhone»</button>' : '';
+    text = `На телефоне «${esc(f.device)}» найдено <b>${f.found}</b> из ${f.checked} — каждый прочитан с телефона целиком и совпал с облачным побайтно.${locked}${mis}${scope}${more}${pairs}<br> <span class="bdg phone">${PHONE_ICON}</span> — есть на телефоне, <span class="bdg nophone">${PHONE_ICON}<i>✕</i></span> — не найден.` +
       (f.found ? ' При удалении можно сразу удалить их и с телефона.' : '');
   } else {
     text = `<span style="color:var(--reject)">${esc(f.message)}</span>`;
   }
   return `<div class="find-bar">${text}</div>`;
+}
+
+/** Пары «облачный оригинал ↔ миниатюра прямо с iPhone» для проверки глазами перед удалением. */
+function pairsHTML(list) {
+  const stamp = S.find.stamp || '';
+  return `<p class="note pairs-note">Слева — файл из облака, справа — миниатюра, которую прислал сам iPhone для найденного файла.
+    Каждый файл на телефоне прочитан целиком и совпал с облачным побайтно. Если что-то выглядит не так — нажмите «Не удалять».</p>
+    <div class="pairs">${list.map(it => `
+    <div class="pair" data-id="${it.id}">
+      <div class="pair-imgs">
+        <figure><img loading="lazy" src="${thumbUrl(it)}" alt=""><figcaption>Облако</figcaption></figure>
+        <span class="pair-eq" title="Содержимое совпадает">=</span>
+        <figure><img loading="lazy" src="/api/phone-thumb/${it.id}?s=${stamp}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'pair-noimg',textContent:'нет миниатюры'}))"><figcaption>iPhone</figcaption></figure>
+      </div>
+      <div class="pair-meta">
+        <div class="pair-names"><b title="${esc(it.p)}">${esc(fileName(it))}</b><span>↔</span><b title="${esc(it.ph)}">${esc(it.ph.split('/').pop())}</b></div>
+        <div class="muted">${fmtSize(it.sz)} · ${fmtDT(it.t)}${it.cx?.length ? ' · вместе с ' + it.cx.join(', ') : ''}</div>
+        <div class="pair-ok"><svg class="i"><use href="#i-check"/></svg>файл совпадает с облачным побайтно (SHA-1)</div>
+        ${it.k === 'v' ? '<div class="muted">у видео iPhone может показать другой кадр — это нормально</div>' : ''}
+      </div>
+      <button class="btn small ghost" data-act="keep" data-id="${it.id}" title="Убрать из корзины — не удалять ни в облаке, ни на телефоне">Не удалять</button>
+    </div>`).join('')}</div>`;
 }
 
 let findTimer = null;
@@ -1352,6 +1384,7 @@ async function phoneFind(everywhere = false) {
 async function pollFind() {
   clearTimeout(findTimer);
   try { S.find = await api('/api/phone-find'); } catch { return; }
+  if (!findRunning()) S.find.stamp = Date.now();
   if (S.view === 'trash') {
     const bar = $('.find-bar');
     if (bar) bar.outerHTML = findBarHTML(); else rerenderKeepScroll();

@@ -414,7 +414,9 @@ class Library:
                     "d": r["dup_id"], "db": r["dup_best"], "dx": r["dup_exact"], "cx": cx,
                     "v": int(r["mtime"] or 0), "err": r["error"],
                     "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"],
-                    "ph": (None if not found or r["id"] not in found else (found[r["id"]] or 0)),
+                    "ph": (None if not found or r["id"] not in found else
+                           (found[r["id"]] or (-1 if r["id"] in self.finder.mismatch else
+                                               -2 if r["id"] in self.finder.unreadable else 0))),
                 })
             return out
 
@@ -469,19 +471,37 @@ class Library:
         with self.connect() as c:
             rows = [dict(r) for r in c.execute(
                 """SELECT id, path, parent_id, kind, size, sha1, ts, ts_source, model, width, height, duration,
-                   phash, dhash, match FROM media
+                   phash, dhash, match, match_ref FROM media
                    WHERE status=? OR parent_id IN (SELECT id FROM media WHERE status=?)""",
                 (STATUS_REJECT, STATUS_REJECT))]
+        hashes: dict[int, str] = {}
+        if phone:
+            # SHA-1 каждого файла из облака: на телефоне удалим только файл с ТАКИМ ЖЕ содержимым
+            for r in rows:
+                if r["parent_id"] is None and self.finder.found.get(r["id"]):
+                    p = self.root / r["path"]
+                    if p.is_file():
+                        hashes[r["id"]] = self._sha1(p)
         removed, errors, freed = self._remove(rows)
         phone_res = None
         if phone:
             # С телефона — только то, что уже ушло из облака в Корзину (копия остаётся восстановимой)
-            paths = self.finder.phone_paths(removed)
-            result = self.finder.device.delete(paths) if paths else {}
+            result: dict[str, str | None] = {}
+            for i in removed:
+                main = self.finder.found.get(i)
+                if not main:
+                    continue
+                if i not in hashes:
+                    result[main] = "нет файла из облака для сверки — не тронут"
+                    continue
+                r1 = self.finder.device.delete([main], {main: hashes[i]})
+                result.update(r1)
+                if r1.get(main) is None and self.finder.extra.get(i):
+                    # Live-видео и правки — только если сам снимок прошёл сверку и удалён
+                    result.update(self.finder.device.delete(self.finder.extra[i]))
+                self.finder.found.pop(i, None)
             phone_res = {"removed": sum(1 for v in result.values() if v is None),
                          "errors": [f"{k}: {v}" for k, v in result.items() if v][:50]}
-            for i in removed:
-                self.finder.found.pop(i, None)
         with self.connect() as c:
             for i in range(0, len(removed), 500):
                 chunk = removed[i:i + 500]
