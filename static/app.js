@@ -47,6 +47,7 @@ const plural = (n, a, b, c) => {
 const fileName = it => it.p.split('/').pop();
 const folderName = it => it.p.includes('/') ? it.p.slice(0, it.p.lastIndexOf('/')) : '(корень)';
 const thumbUrl = it => `/api/thumb/${it.id}?v=${it.v}`;
+const phoneThumbUrl = it => `/api/phone-thumb/${it.id}?s=${S.find?.stamp || ''}`;
 const fileUrl = it => `/api/file/${it.id}?v=${it.v}`;
 const seriesColor = sid => `hsl(${(sid * 137.508) % 360} 68% 62%)`;
 
@@ -403,9 +404,12 @@ function tileHTML(it, o = {}) {
   for (const c of it.cx || []) b.push(`<span class="bdg cx" title="${c === 'RAW' ? 'Есть RAW-файл с тем же именем' : c === 'LIVE' ? 'Live Photo: есть видео с тем же именем' : 'Связанный файл'}">${c}</span>`);
   if (it.err) b.push(`<span class="bdg err" title="${esc(it.err)}">!</span>`);
   const dur = it.k === 'v' ? `<span class="bdg vid-dur">▶ ${fmtDur(it.dur)}</span>` : '';
+  // в корзине у найденных на телефоне — миниатюра, которую прислал сам iPhone
+  const inset = S.view === 'trash' && typeof it.ph === 'string'
+    ? `<span class="ph-inset" title="Так этот файл выглядит на iPhone: ${esc(it.ph.split('/').pop())}"><img src="${phoneThumbUrl(it)}" alt="" onerror="this.parentNode.remove()"><i>iPhone</i></span>` : '';
   return `<div class="${cls.join(' ')}" data-id="${it.id}" style="${style}" title="${esc(fileName(it))} · ${fmtSize(it.sz)}">` +
     `<div class="img"><img loading="lazy" decoding="async" src="${thumbUrl(it)}" alt=""></div>` +
-    `<div class="badges">${b.join('')}</div>${dur}<span class="tsz">${fmtSize(it.sz)}</span></div>`;
+    `<div class="badges">${b.join('')}</div>${dur}${inset}<span class="tsz">${fmtSize(it.sz)}</span></div>`;
 }
 
 function daysHTML(list, o = {}) {
@@ -1273,7 +1277,12 @@ async function emptyTrash() {
         '<p class="muted">Не отключайте телефон и не блокируйте его до конца удаления.</p>'
       : `<p>${plural(list.length, 'файл', 'файла', 'файлов')} (${fmtSize(size)}) будут перемещены ${where}.</p>`) +
     (pairs ? `<p>Вместе с ними удалятся связанные файлы (RAW, Live Photo) — у ${plural(pairs, 'снимка', 'снимков', 'снимков')}.</p>` : '') +
-    (onPhone ? `<label class="row check" style="margin-top:12px"><input type="checkbox" id="delPhone" checked>
+    (onPhone ? `<p style="margin-top:12px"><b>Будут удалены с телефона</b> — слева файл из облака, справа миниатюра с iPhone:</p>
+       <div class="mini-pairs">${list.filter(i => typeof i.ph === 'string').map(i => `
+         <div class="mp" title="${esc(fileName(i))} ↔ ${esc(i.ph)}">
+           <img src="${thumbUrl(i)}" alt=""><span>=</span><img src="${phoneThumbUrl(i)}" alt="" onerror="this.style.visibility='hidden'">
+           <small>${esc(i.ph.split('/').pop())}</small></div>`).join('')}</div>
+       <label class="row check" style="margin-top:12px"><input type="checkbox" id="delPhone" checked>
        <span>Удалить и с телефона «${esc(S.find.device || 'телефон')}» — ${plural(onPhone, 'найденный снимок', 'найденных снимка', 'найденных снимков')} вместе с Live-видео и правками</span></label>
        <p class="note">С телефона файлы удаляются безвозвратно (через провод нет «Недавно удалённых»), но их копии из облака останутся в Корзине Windows.</p>` : ''),
     'Удалить', true);
@@ -1372,7 +1381,6 @@ function findBarHTML() {
 
 /** Пары «облачный оригинал ↔ миниатюра прямо с iPhone» для проверки глазами перед удалением. */
 function pairsHTML(list) {
-  const stamp = S.find.stamp || '';
   return `<p class="note pairs-note">Слева — файл из облака, справа — миниатюра, которую прислал сам iPhone для найденного файла.
     Каждый файл на телефоне прочитан целиком и совпал с облачным побайтно. Если что-то выглядит не так — нажмите «Не удалять».</p>
     <div class="pairs">${list.map(it => `
@@ -1380,7 +1388,7 @@ function pairsHTML(list) {
       <div class="pair-imgs">
         <figure><img loading="lazy" src="${thumbUrl(it)}" alt=""><figcaption>Облако</figcaption></figure>
         <span class="pair-eq" title="Содержимое совпадает">=</span>
-        <figure><img loading="lazy" src="/api/phone-thumb/${it.id}?s=${stamp}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'pair-noimg',textContent:'нет миниатюры'}))"><figcaption>iPhone</figcaption></figure>
+        <figure><img loading="lazy" src="${phoneThumbUrl(it)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'pair-noimg',textContent:'нет миниатюры'}))"><figcaption>iPhone</figcaption></figure>
       </div>
       <div class="pair-meta">
         <div class="pair-names"><b title="${esc(it.p)}">${esc(fileName(it))}</b><span>↔</span><b title="${esc(it.ph)}">${esc(it.ph.split('/').pop())}</b></div>
@@ -1403,7 +1411,12 @@ async function phoneFind(everywhere = false) {
 async function pollFind() {
   clearTimeout(findTimer);
   try { S.find = await api('/api/phone-find'); } catch { return; }
-  if (!findRunning()) S.find.stamp = Date.now();
+  if (!findRunning()) {
+    S.find.stamp = Date.now();
+    if (S.find.phase === 'done' && S.find.found && !pollFind.shown) { pollFind.shown = true; S.phoneFilter = 'found'; }
+  } else {
+    pollFind.shown = false;
+  }
   if (S.view === 'trash') {
     const bar = $('.find-bar');
     if (bar) bar.outerHTML = findBarHTML(); else rerenderKeepScroll();
