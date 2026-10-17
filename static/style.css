@@ -630,3 +630,23 @@ body.tiles-tiny #view-trash .ph-inset i { display: none; }
 .mp span { color: #6ee7b7; font-weight: 800; font-size: 12px; }
 .mp small { grid-column: 1 / -1; color: var(--muted); font-size: 10.5px; text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal-card:has(.mini-pairs) { width: min(680px, 94vw); }
+
+/* ---------- статистика очистки */
+.stats-card {
+  display: flex; align-items: center; gap: 28px; flex-wrap: wrap; margin-bottom: 12px; padding: 14px 18px; border-radius: 14px;
+  background: linear-gradient(135deg, rgba(124, 135, 255, .12), rgba(192, 132, 252, .06)), var(--surface-1);
+  border: 1px solid rgba(124, 135, 255, .22);
+}
+.stats-card:empty { display: none; }
+.stat-l { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.stat-v { font-size: 22px; font-weight: 700; letter-spacing: -.02em; margin-top: 2px; }
+.stat-s { font-size: 12px; color: var(--text-2); }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.stats-table th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; padding: 6px 8px; border-bottom: 1px solid var(--line-2); }
+.stats-table td { padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.stats-table td:first-child { max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.stats-table tr.cur td { color: #c7ccff; font-weight: 600; }
+.stats-table tfoot td { font-weight: 700; color: var(--text); border-bottom: 0; }
+.stats-h { margin: 18px 0 6px; font-size: 13px; }
+.stats-hist { max-height: 220px; overflow-y: auto; }
+.modal-card:has(.stats-table) { width: min(640px, 94vw); }

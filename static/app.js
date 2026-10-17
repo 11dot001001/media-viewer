@@ -70,7 +70,7 @@ function toast(msg, err = false, ms = 3800) {
   setTimeout(() => el.remove(), ms);
 }
 
-function confirmModal(title, html, okText = 'OK', danger = false) {
+function confirmModal(title, html, okText = 'OK', danger = false, cancel = true) {
   return new Promise(resolve => {
     const m = $('#modal');
     $('#mTitle').textContent = title;
@@ -78,6 +78,7 @@ function confirmModal(title, html, okText = 'OK', danger = false) {
     const ok = $('#mOk');
     ok.textContent = okText;
     ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+    $('#mCancel').classList.toggle('hidden', !cancel);
     m.classList.remove('hidden');
     const done = v => { m.classList.add('hidden'); ok.onclick = null; $('#mCancel').onclick = null; M.resolve = null; resolve(v); };
     ok.onclick = () => done(true);
@@ -363,6 +364,7 @@ function renderCats() {
 // ============================================================ отрисовка
 function setView(v) {
   S.view = v;
+  if (v === 'trash') S.stats = null;  // статистику перечитываем при каждом открытии корзины
   S.selected.clear();
   S.focus = null;
   render();
@@ -571,6 +573,8 @@ function renderTrash() {
     ${S.source?.kind === 'folder' ? `<button class="btn" data-act="phone-find" ${all.length && !findRunning() ? '' : 'disabled'} title="Найти эти снимки на подключённом iPhone, чтобы удалить их и оттуда">${PHONE_ICON} Найти на телефоне</button>` : ''}
     <button class="btn ghost" data-act="trash-restore" ${all.length ? '' : 'disabled'}>Вернуть все</button>
     <button class="btn danger" data-act="trash-empty" ${all.length ? '' : 'disabled'}>Удалить ${all.length ? plural(all.length, 'файл', 'файла', 'файлов') : ''}${S.trashTarget === 'phone' ? ' с телефона' : ''}…</button></div>`;
+  html += statsCardHTML();
+  if (!S.stats) loadStats();
   const phoneSeg = checked ? `<div class="seg ph-seg">${[
     ['all', 'Все', all.length],
     ['found', 'Есть на телефоне', all.filter(i => typeof i.ph === 'string').length],
@@ -1253,6 +1257,7 @@ async function onAction(act, el) {
     case 'trash-restore': applyStatuses(new Map(S.items.filter(i => i.st === 2).map(i => [i.id, 0]))); break;
     case 'trash-empty': emptyTrash(); break;
     case 'phone-find': phoneFind(); break;
+    case 'stats-more': statsModal(); break;
     case 'phone-find-all': phoneFind(true); break;
     case 'fold': setFolded([el.dataset.key], !S.folded.has(el.dataset.key)); break;
     case 'fold-all': setView('grid'); setFolded(new Set(gridList().map(groupKey)), true); break;
@@ -1293,7 +1298,8 @@ async function emptyTrash() {
     const r = await api('/api/trash/empty', { phone: delPhone });
     S.undo = [];
     toast(`Удалено: ${plural(r.removed, 'файл', 'файла', 'файлов')}, освобождено ${fmtSize(r.freed)}` +
-      (r.phone ? `<br>С телефона удалено: ${plural(r.phone.removed, 'файл', 'файла', 'файлов')}` : ''));
+      (r.phone ? `<br>С телефона удалено: ${plural(r.phone.removed, 'файл', 'файла', 'файлов')}, освобождено ${fmtSize(r.phone.freed)}` : ''));
+    S.stats = null;
     if (r.errors?.length) toast('Не удалось удалить:<br>' + r.errors.slice(0, 5).map(esc).join('<br>'), true, 10000);
     if (r.phone?.errors?.length) toast('С телефона не удалось удалить:<br>' + r.phone.errors.slice(0, 5).map(esc).join('<br>'), true, 12000);
     await loadItems();
@@ -1398,6 +1404,70 @@ function pairsHTML(list) {
       </div>
       <button class="btn small ghost" data-act="keep" data-id="${it.id}" title="Убрать из корзины — не удалять ни в облаке, ни на телефоне">Не удалять</button>
     </div>`).join('')}</div>`;
+}
+
+// ---------- статистика: сколько места освобождено
+async function loadStats() {
+  try { S.stats = await api('/api/stats'); } catch { return; }
+  const el = $('#statsCard');
+  if (el) el.outerHTML = statsCardHTML();
+}
+
+function statTotals(source) {
+  const rows = (S.stats?.totals || []).filter(t => t.source === source);
+  return { cloud: rows.find(t => t.what === 'cloud'), phone: rows.find(t => t.what === 'phone') };
+}
+
+const approx = t => (t?.estimated ? '≈ ' : '');
+
+function statsCardHTML() {
+  const st = S.stats;
+  if (!st) return '<div class="stats-card" id="statsCard"></div>';
+  const { cloud, phone } = statTotals(st.source);
+  if (!cloud && !phone) {
+    return `<div class="stats-card" id="statsCard"><span class="muted">Здесь будет видно, сколько места освобождено в этой папке и на телефоне.</span>
+      ${st.totals.length ? '<button class="link" data-act="stats-more">Все папки</button>' : ''}</div>`;
+  }
+  const block = (label, value, sub) => `<div class="stat"><div class="stat-l">${label}</div><div class="stat-v">${value}</div><div class="stat-s">${sub}</div></div>`;
+  const parts = [];
+  if (cloud) parts.push(block(S.source?.kind === 'folder' ? 'Освобождено в папке' : 'Освобождено', approx(cloud) + fmtSize(cloud.bytes),
+    `${plural(cloud.files, 'файл', 'файла', 'файлов')} · ${plural(cloud.sessions, 'очистка', 'очистки', 'очисток')}`));
+  if (phone) parts.push(block('Освобождено на телефоне', fmtSize(phone.bytes), `${plural(phone.files, 'файл', 'файла', 'файлов')}`));
+  if (cloud && st.folder_size != null) {
+    const before = st.folder_size + cloud.bytes;
+    // два знака после запятой: иначе «22 ГБ → 22 ГБ»
+    const precise = b => (b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(2).replace('.', ',') + ' ГБ' : fmtSize(b));
+    parts.push(block('Размер папки', `${precise(before)} → ${precise(st.folder_size)}`,
+      `−${(cloud.bytes / before * 100).toFixed(cloud.bytes / before < 0.01 ? 2 : 1).replace('.', ',')} %`));
+  }
+  return `<div class="stats-card" id="statsCard">${parts.join('')}<div class="spacer"></div>
+    <button class="btn small ghost" data-act="stats-more">Подробнее</button></div>`;
+}
+
+async function statsModal() {
+  if (!S.stats) await loadStats();
+  const st = S.stats;
+  const sources = [...new Set(st.totals.map(t => t.source))];
+  const fdt = t => new Date(t * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const folders = sources.map(src => {
+    const { cloud, phone } = statTotals(src);
+    const name = src.split(/[\\/]/).filter(Boolean).pop() || src;
+    return `<tr${src === st.source ? ' class="cur"' : ''}><td title="${esc(src)}">${esc(name)}</td>
+      <td>${cloud ? approx(cloud) + fmtSize(cloud.bytes) : '—'}</td><td>${cloud ? cloud.files : '—'}</td>
+      <td>${phone ? fmtSize(phone.bytes) : '—'}</td><td>${phone ? phone.files : '—'}</td></tr>`;
+  }).join('');
+  const sum = (what, key) => st.totals.filter(t => t.what === what).reduce((a, t) => a + (t[key] || 0), 0);
+  const hist = st.history.map(h => `<tr><td>${fdt(h.at)}</td><td>${h.what === 'phone' ? 'телефон' + (h.device ? ` «${esc(h.device)}»` : '') : 'папка'}</td>
+      <td>${h.estimated ? '≈ ' : ''}${fmtSize(h.bytes)}</td><td>${h.files}</td></tr>`).join('');
+  const html = `
+    <table class="stats-table"><thead><tr><th>Папка</th><th>Освобождено</th><th>Файлов</th><th>С телефона</th><th>Файлов</th></tr></thead>
+      <tbody>${folders}</tbody>
+      <tfoot><tr><td>Всего</td><td>${fmtSize(sum('cloud', 'bytes'))}</td><td>${sum('cloud', 'files')}</td>
+        <td>${fmtSize(sum('phone', 'bytes'))}</td><td>${sum('phone', 'files')}</td></tr></tfoot></table>
+    ${hist ? `<h4 class="stats-h">История очисток: ${esc((st.source || '').split(/[\\/]/).filter(Boolean).pop() || '')}</h4>
+      <div class="stats-hist"><table class="stats-table"><thead><tr><th>Когда</th><th>Откуда</th><th>Освобождено</th><th>Файлов</th></tr></thead><tbody>${hist}</tbody></table></div>` : ''}
+    ${st.totals.some(t => t.estimated) ? '<p class="note">≈ — восстановлено из журнала удалений: без парных RAW и Live-видео, удаления с телефона тогда не учитывались.</p>' : ''}`;
+  await confirmModal('Сколько места освобождено', html, 'Закрыть', false, false);
 }
 
 let findTimer = null;

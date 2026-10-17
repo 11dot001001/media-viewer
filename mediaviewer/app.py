@@ -183,6 +183,16 @@ def phone_find_start(req: FindReq | None = None):
     return lb.finder.status
 
 
+@app.get("/api/stats")
+def stats():
+    """Сколько места освобождено: по всем папкам и история текущей."""
+    j = _lib.journal if _lib is not None else Journal(DATA / "journal.db")
+    res = j.stats(_lib.title if _lib is not None else None)
+    res["source"] = _lib.title if _lib is not None else None
+    res["folder_size"] = _lib.status.get("folder_size") if _lib is not None else None
+    return res
+
+
 @app.get("/api/phone-thumb/{mid}")
 def phone_thumb(mid: int):
     lb = lib()

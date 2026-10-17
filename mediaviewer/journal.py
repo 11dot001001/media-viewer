@@ -21,6 +21,16 @@ CREATE TABLE IF NOT EXISTS deleted(
 );
 CREATE INDEX IF NOT EXISTS ix_deleted_ts ON deleted(ts);
 CREATE INDEX IF NOT EXISTS ix_deleted_sha1 ON deleted(sha1);
+CREATE TABLE IF NOT EXISTS cleanups(
+  id INTEGER PRIMARY KEY,
+  at REAL,
+  source TEXT,          -- папка (или телефон в режиме «Телефон»), из корзины которой удаляли
+  what TEXT,            -- cloud — файлы папки, phone — файлы на телефоне
+  device TEXT,          -- имя телефона для what=phone
+  files INTEGER, bytes INTEGER,
+  estimated INTEGER NOT NULL DEFAULT 0  -- восстановлено из журнала (без парных RAW/Live)
+);
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 """
 
 FIELDS = ("name", "path", "source", "kind", "size", "sha1", "ts", "ts_source", "model", "width", "height",
@@ -33,6 +43,7 @@ class Journal:
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as c:
             c.executescript(SCHEMA)
+            self._backfill(c)
 
     def connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30)
@@ -48,6 +59,33 @@ class Journal:
             c.executemany(
                 f"INSERT INTO deleted({', '.join(FIELDS)}, deleted_at) VALUES({', '.join('?' * len(FIELDS))}, ?)",
                 [tuple(r.get(k) for k in FIELDS) + (now,) for r in rows])
+
+    def _backfill(self, c) -> None:
+        """Однократно (при первом запуске с учётом): история очисток из журнала удалений."""
+        if c.execute("SELECT 1 FROM meta WHERE key='backfilled'").fetchone():
+            return
+        c.execute("""INSERT INTO cleanups(at, source, what, files, bytes, estimated)
+                     SELECT MIN(deleted_at), source, 'cloud', COUNT(*), SUM(size), 1 FROM deleted
+                     GROUP BY source, CAST(deleted_at / 60 AS INTEGER)""")
+        c.execute("INSERT INTO meta(key, value) VALUES('backfilled', '1')")
+
+    def record_cleanup(self, source: str, what: str, files: int, size: int, device: str | None = None) -> None:
+        if not files:
+            return
+        with self.connect() as c:
+            c.execute("INSERT INTO cleanups(at, source, what, device, files, bytes) VALUES(?, ?, ?, ?, ?, ?)",
+                      (time.time(), source, what, device, files, size))
+
+    def stats(self, source: str | None) -> dict:
+        with self.connect() as c:
+            totals = [dict(r) for r in c.execute(
+                """SELECT source, what, SUM(files) AS files, SUM(bytes) AS bytes, COUNT(*) AS sessions,
+                          MIN(at) AS first, MAX(at) AS last, MAX(estimated) AS estimated
+                   FROM cleanups GROUP BY source, what ORDER BY MAX(at) DESC""")]
+            history = [dict(r) for r in c.execute(
+                "SELECT at, what, device, files, bytes, estimated FROM cleanups WHERE source=? ORDER BY at DESC LIMIT 100",
+                (source,))] if source else []
+        return {"totals": totals, "history": history}
 
     def count(self) -> int:
         with self.connect() as c:

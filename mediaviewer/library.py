@@ -487,6 +487,7 @@ class Library:
         if phone:
             # С телефона — только то, что уже ушло из облака в Корзину (копия остаётся восстановимой)
             result: dict[str, str | None] = {}
+            phone_sizes = {rel: e[1] for rel, e in self.finder.device._ids.items()}
             for i in removed:
                 main = self.finder.found.get(i)
                 if not main:
@@ -500,8 +501,11 @@ class Library:
                     # Live-видео и правки — только если сам снимок прошёл сверку и удалён
                     result.update(self.finder.device.delete(self.finder.extra[i]))
                 self.finder.found.pop(i, None)
-            phone_res = {"removed": sum(1 for v in result.values() if v is None),
+            done = [k for k, v in result.items() if v is None]
+            phone_res = {"removed": len(done), "freed": sum(phone_sizes.get(k, 0) for k in done),
                          "errors": [f"{k}: {v}" for k, v in result.items() if v][:50]}
+            self.journal.record_cleanup(self.title, "phone", phone_res["removed"], phone_res["freed"],
+                                        self.finder.device.name)
         with self.connect() as c:
             for i in range(0, len(removed), 500):
                 chunk = removed[i:i + 500]
@@ -517,6 +521,8 @@ class Library:
             self.status["folder_size"] = max(0, self.status["folder_size"] - freed)
             self.status["folder_files"] = max(0, self.status["folder_files"] - len(removed))
             self.save_settings({k: self.status[k] for k in ("folder_size", "folder_files")})
+        self.journal.record_cleanup(self.title, "cloud" if self.kind == "folder" else "phone", len(removed), freed,
+                                    None if self.kind == "folder" else self.title)
         return {"removed": len(removed), "errors": errors[:50], "freed": freed, "target": self.trash_target(),
                 "phone": phone_res}
 
