@@ -233,7 +233,7 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 #welcomeBack { margin-top: 14px !important; }
 
 /* ---------- лента */
-.day { content-visibility: auto; contain-intrinsic-size: auto 420px; }
+.day { }
 .day-head {
   position: sticky; top: 0; z-index: 3; display: flex; align-items: baseline; gap: 10px;
   margin: 0 -22px; padding: 18px 22px 10px;
@@ -244,7 +244,7 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 .day-head .sub { color: var(--muted); font-size: 12px; }
 .day-head .link { opacity: 0; transition: opacity .15s; }
 .day:hover .day-head .link { opacity: 1; }
-.tiles { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 2px; }
+.tiles { display: flex; flex-wrap: wrap; gap: var(--gap, 4px); padding-top: 2px; }
 .tile {
   position: relative; width: var(--thumb); height: var(--thumb); border-radius: 10px; overflow: visible;
   background: var(--surface-2); cursor: pointer; flex: none; outline: none;
@@ -280,7 +280,7 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 .tile.ser::before {
   content: ""; position: absolute; left: 2px; right: 2px; bottom: -3px; height: 2.5px; border-radius: 2px; background: var(--sc); opacity: .9;
 }
-.tile.ser.ser-next::before { right: -4px; border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.tile.ser.ser-next::before { right: calc(-1 * var(--gap, 4px)); border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .badges { position: absolute; left: 6px; top: 6px; right: 6px; z-index: 2; display: flex; flex-wrap: wrap; gap: 4px; pointer-events: none; }
 .bdg {
   display: inline-flex; align-items: center; gap: 3px;
@@ -552,7 +552,7 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 .day-head .fold svg.i { width: 15px; height: 15px; stroke-width: 2.3; transform: rotate(90deg); transition: transform .2s var(--ease); }
 .day-head.foldable:hover .fold { background: rgba(255, 255, 255, .07); color: var(--text); }
 .day.folded .fold svg.i { transform: rotate(0deg); }
-.day.folded { contain-intrinsic-size: auto 56px; }
+
 .day.folded .day-head { position: static; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .day.folded h3 { color: var(--text-2); }
 .peek { display: inline-flex; align-self: center; margin-left: 6px; }
@@ -563,6 +563,24 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 .peek img:first-child { margin-left: 0; }
 .fold-btns { display: flex; gap: 4px; margin-top: 6px; }
 .fold-btns .btn { flex: 1; }
+
+/* ---------- масштаб ленты: мелкие плитки */
+#granSeg { margin: 4px 0 6px; }
+.hint-line { font-size: 11.5px; color: var(--muted); padding-left: 6px; }
+.hint-line kbd { font-size: 10px; }
+body.tiles-tiny :is(#view-grid, #view-trash) .tile,
+body.tiles-tiny :is(#view-grid, #view-trash) .tile .img { border-radius: 5px; }
+body.tiles-tiny :is(#view-grid, #view-trash) .tile :is(.badges, .tsz, .vid-dur) { display: none; }
+body.tiles-tiny :is(#view-grid, #view-trash) .tile:hover img { transform: none; }
+body.tiles-tiny :is(#view-grid, #view-trash) .tile.st-1 .img::after { width: 13px; height: 13px; font-size: 8px; right: 3px; bottom: 3px; }
+body.tiles-tiny :is(#view-grid, #view-trash) .tile.st-2::after { width: 20px; height: 20px; font-size: 10px; }
+body.tiles-tiny :is(#view-grid, #view-trash) .tile.ser::before { bottom: -2px; height: 2px; }
+body.tiles-micro :is(#view-grid, #view-trash) .tile,
+body.tiles-micro :is(#view-grid, #view-trash) .tile .img { border-radius: 2px; }
+body.tiles-micro :is(#view-grid, #view-trash) .tile.st-1 .img::after,
+body.tiles-micro :is(#view-grid, #view-trash) .tile.st-2::after { display: none; }
+body.tiles-micro :is(#view-grid, #view-trash) .tile.ser::before { display: none; }
+#view-grid, #view-trash { scrollbar-gutter: stable; }
 
 /* ---------- пары «облако ↔ iPhone» */
 .bdg.phmis { background: var(--warn); color: #2a1d00; }

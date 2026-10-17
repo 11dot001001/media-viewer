@@ -106,7 +106,13 @@
 
     <section>
       <h4>Вид</h4>
-      <label class="row">Размер плиток <input type="range" id="thumbSize" min="110" max="320" step="10"></label>
+      <label class="row" title="Ctrl + колесо мыши или «щипок» на тачпаде">В ряду <span class="range-val"><input type="range" id="colsRange" min="2" max="30" step="1"><span id="colsVal" class="mono"></span></span></label>
+      <div id="granSeg" class="seg" title="Группировка ленты — меняется вместе с масштабом">
+        <button data-g="day">Дни</button>
+        <button data-g="month">Месяцы</button>
+        <button data-g="year">Годы</button>
+      </div>
+      <div class="hint-line"><kbd>Ctrl</kbd> + колесо — масштаб ленты</div>
       <label class="row">Порядок
         <select id="sortOrder">
           <option value="desc">Сначала новые</option>

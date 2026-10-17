@@ -96,7 +96,7 @@ const prefs = {
 const S = {
   root: null, items: [], byId: new Map(), series: new Map(), dups: new Map(),
   view: 'grid', cats: new Set(prefs.get('cats', Object.keys(CATS))), status: 'all', from: '', to: '',
-  sort: prefs.get('sort', 'desc'), collapse: prefs.get('collapse', false), thumb: prefs.get('thumb', 170),
+  sort: prefs.get('sort', 'desc'), collapse: prefs.get('collapse', false), cols: prefs.get('cols', 6),
   onlyOpen: prefs.get('onlyOpen', true),
   folded: new Set(prefs.get('folded', [])),  // свёрнутые дни / группы ленты
   list: [], selected: new Set(), focus: null, anchor: null,
@@ -260,8 +260,27 @@ const SIZE_BUCKETS = [
   [1024 ** 3, 'Больше 1 ГБ'], [100 * 1024 ** 2, '100 МБ – 1 ГБ'], [10 * 1024 ** 2, '10 – 100 МБ'],
   [1024 ** 2, '1 – 10 МБ'], [0, 'Меньше 1 МБ'],
 ];
-const groupKey = it => (S.sort === 'size' ? 'sz' + SIZE_BUCKETS.findIndex(([min]) => (it.sz || 0) >= min) : dayKey(it.t));
-const groupTitle = k => (k.startsWith('sz') ? SIZE_BUCKETS[+k.slice(2)][1] : fmtDay(k));
+// Масштаб ленты как в «Фото» на iPhone: чем больше снимков в ряду, тем крупнее группы
+const ZOOM_LEVELS = [2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 18, 22, 26, 30];
+const GRAN_COLS = { day: 5, month: 10, year: 18 };
+const granularity = () => (S.cols <= 7 ? 'day' : S.cols <= 15 ? 'month' : 'year');
+const fmtMonthF = new Intl.DateTimeFormat('ru-RU', { timeZone: 'UTC', month: 'long', year: 'numeric' });
+
+function groupKey(it) {
+  if (S.sort === 'size') return 'sz' + SIZE_BUCKETS.findIndex(([min]) => (it.sz || 0) >= min);
+  const d = dayKey(it.t);
+  if (d === 'none') return d;
+  const g = granularity();
+  return g === 'day' ? d : g === 'month' ? 'm' + d.slice(0, 7) : 'y' + d.slice(0, 4);
+}
+function groupTitle(k) {
+  if (k.startsWith('sz')) return SIZE_BUCKETS[+k.slice(2)][1];
+  if (k.startsWith('m')) return fmtMonthF.format(new Date(k.slice(1) + '-01T00:00:00Z')).replace(/\s*г\.$/, '');
+  if (k.startsWith('y')) return k.slice(1);
+  return fmtDay(k);
+}
+const groupSelectLabel = k => (k.startsWith('sz') ? 'выбрать все' : k.startsWith('m') ? 'выбрать месяц'
+  : k.startsWith('y') ? 'выбрать год' : 'выбрать день');
 
 function seriesRep(sid) {
   const arr = S.series.get(sid) || [];
@@ -405,7 +424,7 @@ function daysHTML(list, o = {}) {
       ? `<span class="peek">${items.slice(0, 8).map(it => `<img loading="lazy" src="${thumbUrl(it)}" alt="">`).join('')}</span>` : '';
     html += `<section class="day${folded ? ' folded' : ''}"><div class="day-head${o.foldable ? ' foldable' : ''}" ${o.foldable ? `data-fold="${k}"` : ''}>${fold}<h3>${groupTitle(k)}</h3>` +
       `<span class="sub">${plural(items.length, 'файл', 'файла', 'файлов')} · ${fmtSize(total)}</span>${peek}` +
-      (folded ? '' : `<button class="link" data-day="${k}">${k.startsWith('sz') ? 'выбрать все' : 'выбрать день'}</button>`) +
+      (folded ? '' : `<button class="link" data-day="${k}">${groupSelectLabel(k)}</button>`) +
       `</div>`;
     if (folded) { html += '</section>'; continue; }
     html += '<div class="tiles">';
@@ -1425,8 +1444,8 @@ async function openFolder(path) {
 
 // ============================================================ привязка интерфейса
 function bindUI() {
-  document.documentElement.style.setProperty('--thumb', S.thumb + 'px');
-  $('#thumbSize').value = S.thumb;
+  layoutTiles();
+  new ResizeObserver(() => layoutTiles()).observe($('#main'));
   $('#collapseSeries').checked = S.collapse;
   $('#sortOrder').value = S.sort;
 
@@ -1484,11 +1503,11 @@ function bindUI() {
   $('#dateFrom').onchange = e => { S.from = e.target.value; filtersChanged(); };
   $('#dateTo').onchange = e => { S.to = e.target.value; filtersChanged(); };
   $('#dateReset').onclick = () => { S.from = S.to = ''; $('#dateFrom').value = $('#dateTo').value = ''; filtersChanged(); };
-  $('#thumbSize').oninput = e => {
-    S.thumb = +e.target.value;
-    document.documentElement.style.setProperty('--thumb', S.thumb + 'px');
-    prefs.set('thumb', S.thumb);
-  };
+  $('#colsRange').oninput = e => setCols(+e.target.value);
+  $('#granSeg').addEventListener('click', e => {
+    const b = e.target.closest('[data-g]');
+    if (b) setCols(GRAN_COLS[b.dataset.g]);
+  });
   $('#collapseSeries').onchange = e => { S.collapse = e.target.checked; prefs.set('collapse', S.collapse); render(); };
   $('#sortOrder').onchange = e => {
     S.sort = e.target.value;
@@ -1512,6 +1531,19 @@ function bindUI() {
   });
 
   const main = $('#main');
+  // Ctrl + колесо (и «щипок» на тачпаде) — сколько снимков в ряду
+  let zoomAcc = 0;
+  main.addEventListener('wheel', e => {
+    if (!e.ctrlKey || !['grid', 'trash'].includes(S.view)) return;
+    e.preventDefault();
+    zoomAcc += e.deltaY;
+    if (Math.abs(zoomAcc) < 40) return;
+    const dir = zoomAcc > 0 ? 1 : -1;
+    zoomAcc = 0;
+    const i = ZOOM_LEVELS.reduce((best, v, j) => (Math.abs(v - S.cols) < Math.abs(ZOOM_LEVELS[best] - S.cols) ? j : best), 0);
+    const next = ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, Math.max(0, i + dir))];
+    setCols(next, { x: e.clientX, y: e.clientY });
+  }, { passive: false });
   main.addEventListener('click', e => {
     const act = e.target.closest('[data-act]');
     if (act) { onAction(act.dataset.act, act); return; }
@@ -1609,6 +1641,69 @@ function bindUI() {
     if (!$('#welcome').classList.contains('hidden')) { if (e.key === 'Escape' && S.root) showWelcome(false); return; }
     gridKey(e);
   });
+}
+
+/** Ширина плитки из числа колонок: ряд всегда заполняет ширину ленты. */
+function layoutTiles() {
+  const view = $('#view-grid');
+  const w = (view.clientWidth || $('#main').clientWidth) - 44;  // минус боковые отступы ленты
+  const gap = S.cols >= 12 ? 2 : S.cols >= 8 ? 3 : 4;
+  const thumb = Math.max(24, Math.floor((w - gap * (S.cols - 1)) / S.cols));
+  const root = document.documentElement.style;
+  root.setProperty('--thumb', thumb + 'px');
+  root.setProperty('--gap', gap + 'px');
+  document.body.classList.toggle('tiles-tiny', thumb < 100);
+  document.body.classList.toggle('tiles-micro', thumb < 60);
+  $('#colsRange').value = S.cols;
+  $('#colsVal').textContent = S.cols;
+  const g = granularity();
+  $$('#granSeg button').forEach(b => b.classList.toggle('active', b.dataset.g === g));
+}
+
+/** Плитка под точкой (или ближайшая к ней) — по геометрии, без elementFromPoint. */
+function tileAt(view, x, y) {
+  let best = null, bestD = Infinity;
+  for (const t of view.querySelectorAll('.tile')) {
+    const b = t.getBoundingClientRect();
+    if (!b.width || b.bottom < 0 || b.top > innerHeight) continue;
+    if (x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) return t;
+    const d = Math.hypot((b.left + b.right) / 2 - x, (b.top + b.bottom) / 2 - y);
+    if (d < bestD) { bestD = d; best = t; }
+  }
+  return best;
+}
+
+/** Сменить число колонок, удерживая на месте снимок под курсором (или в центре). */
+function setCols(n, point) {
+  n = Math.max(2, Math.min(30, Math.round(n)));
+  if (n === S.cols) return;
+  const view = $('#view-' + S.view);
+  const scrollable = view && ['grid', 'trash'].includes(S.view);
+  let anchor = null, offset = 0;
+  if (scrollable) {
+    const r = view.getBoundingClientRect();
+    const t = tileAt(view, point?.x ?? r.left + r.width / 2, point?.y ?? r.top + r.height / 2);
+    if (t) { anchor = t.dataset.id; offset = t.getBoundingClientRect().top - r.top; }
+  }
+  const before = granularity();
+  S.cols = n;
+  prefs.set('cols', n);
+  layoutTiles();
+  const rerendered = granularity() !== before;
+  if (rerendered) render();
+  if (!anchor) return;
+  const fix = () => {
+    const el = view.querySelector(`.tile[data-id="${anchor}"]`);
+    // несколько проходов: после прокрутки браузер раскладывает ставшие видимыми блоки (content-visibility)
+    for (let i = 0; el && i < 4; i++) {
+      const d = el.getBoundingClientRect().top - view.getBoundingClientRect().top - offset;
+      if (Math.abs(d) < 1) break;
+      view.scrollTop += d;
+    }
+  };
+  fix();
+  // после перерисовки настоящая высота блоков известна только со следующего кадра
+  if (rerendered) requestAnimationFrame(() => requestAnimationFrame(fix));
 }
 
 function filtersChanged() {
