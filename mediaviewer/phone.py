@@ -1,0 +1,407 @@
+"""Телефон как источник: список файлов, копирование на компьютер, удаление, сверка с облаком.
+
+iPhone (и Android) подключаются к Windows по MTP: у них нет буквы диска, поэтому работаем через
+Windows Portable Devices (wpd.py).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import threading
+from pathlib import Path
+
+from send2trash import send2trash
+
+from . import matching, media
+from .library import STATUS_REJECT, Library
+
+COPY_LIMIT_FILES = 1500  # больше — спрашиваем, прежде чем копировать с телефона
+COPY_LIMIT_BYTES = 10 * 1024 ** 3
+MEDIA_DIRS = ("DCIM", "Pictures", "Movies")  # Android; новые iPhone показывают папки по месяцам в корне
+LIST_EXT = media.ALL_EXT | {".aae"}  # .AAE — правки iOS, удаляются вместе со снимком
+
+
+# ============================================================ устройства
+
+class FolderDevice:
+    """Папка, которая ведёт себя как телефон (для тестов и для карт памяти)."""
+
+    def __init__(self, root: Path, name: str | None = None):
+        self.root = Path(root).resolve()
+        self.name = name or self.root.name
+        self.key = "dir-" + hashlib.sha1(str(self.root).lower().encode()).hexdigest()[:10]
+
+    def list_files(self, progress=None, cache=None, folder_filter=None) -> list[tuple[str, int, float, float | None]]:
+        out = []
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for f in filenames:
+                p = Path(dirpath, f)
+                st = p.stat()
+                out.append((p.relative_to(self.root).as_posix(), st.st_size, st.st_mtime, None))
+        return out
+
+    def fetch(self, rels: list[str], dest_root: Path, progress=None) -> None:
+        for i, rel in enumerate(rels, 1):
+            dest = dest_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.root / rel, dest)
+            if progress:
+                progress(i)
+
+    def delete(self, rels: list[str]) -> dict[str, str | None]:
+        res = {}
+        for rel in rels:
+            try:
+                (self.root / rel).unlink()
+                res[rel] = None
+            except OSError as e:
+                res[rel] = str(e)
+        return res
+
+
+class WpdDevice:
+    """Телефон по MTP через Windows Portable Devices (см. wpd.py)."""
+
+    def __init__(self, device_id: str, name: str | None = None, serial: str | None = None):
+        self.device_id = device_id
+        self._local = threading.local()
+        self._lock = threading.Lock()
+        if not name or not serial:
+            info = self._conn().device_info()
+            name = name or info.get("name")
+            serial = serial or info.get("serial")
+        self.name = name or "Телефон"
+        self.key = "wpd-" + hashlib.sha1((serial or device_id).lower().encode()).hexdigest()[:10]
+        self._ids: dict[str, tuple[str, int, str]] = {}  # rel -> (id объекта, размер, id папки)
+
+    def _conn(self):
+        from . import wpd
+
+        if not hasattr(self._local, "c"):
+            self._local.c = wpd.Connection(self.device_id)
+        return self._local.c
+
+    @staticmethod
+    def list_devices() -> list[dict]:
+        from . import wpd
+
+        out = []
+        for dev_id in wpd.list_device_ids():
+            try:
+                info = wpd.Connection(dev_id).device_info()
+            except Exception:  # noqa: BLE001 — устройство заблокировано или не доверяет компьютеру
+                info = {}
+            out.append({"name": info.get("name") or "Телефон", "path": dev_id, "serial": info.get("serial")})
+        return out
+
+    def list_files(self, progress=None, cache: dict | None = None,
+                   folder_filter=None) -> list[tuple[str, int, float, float | None]]:
+        """Обход телефона. cache: {id объекта: свойства} с прошлых подключений, дополняется на месте.
+        folder_filter(rel) -> bool: в какие папки заходить (None — во все)."""
+        cache = cache if cache is not None else {}
+        with self._lock:
+            c = self._conn()
+            out: list[tuple[str, int, float, float | None]] = []
+            ids: dict[str, tuple[str, int, str]] = {}
+            storages = c.properties(c.children("DEVICE"))
+            frontier = [(sid, r["name"]) for sid, r in storages.items()]
+            while frontier:
+                kids = [(k, fid, prefix) for fid, prefix in frontier for k in c.children(fid)]
+                unknown = [k for k, _, _ in kids if k not in cache]
+                if unknown:
+                    total = len(unknown)
+                    cache.update(c.properties(unknown, (lambda n: progress(n, total)) if progress else None))
+                nxt = []
+                for k, fid, prefix in kids:
+                    r = cache.get(k)
+                    if not r:
+                        continue
+                    rel = f"{prefix}/{r['name']}"
+                    if r["folder"]:
+                        if not r["name"].startswith(".") and (folder_filter is None or folder_filter(rel)):
+                            nxt.append((k, rel))
+                    elif os.path.splitext(r["name"])[1].lower() in LIST_EXT:
+                        out.append((rel, r["size"], r["modified"] or 0.0, r["created"]))
+                        ids[rel] = (k, r["size"], fid)
+                frontier = nxt
+            if folder_filter is None:
+                self._ids = ids
+            else:
+                self._ids.update(ids)
+            return out
+
+    def _ensure_ids(self, rels: list[str]) -> None:
+        if any(r not in self._ids for r in rels):
+            self.list_files()
+
+    def fetch(self, rels: list[str], dest_root: Path, progress=None) -> None:
+        self._ensure_ids(rels)
+        with self._lock:
+            c = self._conn()
+            for i, rel in enumerate(rels, 1):
+                if rel not in self._ids:
+                    raise FileNotFoundError(f"{rel}: файла нет на телефоне")
+                oid, size, _ = self._ids[rel]
+                dest = dest_root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                c.read_file(oid, size, dest)
+                if progress:
+                    progress(i)
+
+    def delete(self, rels: list[str]) -> dict[str, str | None]:
+        self._ensure_ids(rels)
+        res: dict[str, str | None] = {r: "файла уже нет на телефоне" for r in rels if r not in self._ids}
+        todo = [r for r in rels if r in self._ids]
+        with self._lock:
+            c = self._conn()
+            for i in range(0, len(todo), 100):
+                chunk = todo[i:i + 100]
+                try:
+                    c.delete([self._ids[r][0] for r in chunk])
+                except Exception as e:  # noqa: BLE001 — проверим ниже, что реально удалилось
+                    for r in chunk:
+                        res[r] = f"ошибка удаления: {e}"
+            # проверка: что реально исчезло с телефона
+            parents = {self._ids[r][2] for r in todo}
+            present = {k for p in parents for k in c.children(p)}
+        for r in todo:
+            oid = self._ids[r][0]
+            if oid in present:
+                res[r] = res.get(r) or "телефон не дал удалить файл"
+            else:
+                res[r] = None
+                self._ids.pop(r, None)
+        return res
+
+
+def phone_db(data_dir: Path, device) -> Path:
+    d = data_dir / "phones" / device.key
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "name.txt").write_text(device.name, encoding="utf-8")
+    return d / "index.db"
+
+
+def list_with_cache(device, db_path: Path, progress=None, folder_filter=None) -> list[tuple[str, int, float, float | None]]:
+    """Список файлов телефона. Свойства объектов кэшируются в БД телефона: на iPhone ID объектов постоянные,
+    а чтение свойств — самая медленная часть (~25–50 мс на файл)."""
+    with sqlite3.connect(db_path, timeout=30) as c:
+        c.execute("CREATE TABLE IF NOT EXISTS objcache(id TEXT PRIMARY KEY, data TEXT)")
+        cache = {r[0]: json.loads(r[1]) for r in c.execute("SELECT id, data FROM objcache")}
+    known = set(cache)
+    lst = device.list_files((lambda n, total: progress(n, total, not known)) if progress else None, cache,
+                            folder_filter)
+    new = [(k, json.dumps(v)) for k, v in cache.items() if k not in known]
+    if new:
+        with sqlite3.connect(db_path, timeout=30) as c:
+            c.executemany("INSERT OR REPLACE INTO objcache(id, data) VALUES(?, ?)", new)
+    return lst
+
+
+def companions(rel: str, all_rels) -> list[str]:
+    """Файлы на телефоне, которые удаляются вместе со снимком: Live-видео, правки (.AAE, IMG_E…)."""
+    folder, name = rel.rsplit("/", 1)
+    m = re.match(r"(?i)img_([eo]?)(\d+)\.", name)
+    if not m:
+        return []
+    edited, num = bool(m.group(1)), m.group(2)  # в облако попала правленая версия — оригинал тоже лишний
+    out = []
+    for r in all_rels:
+        if r == rel or not r.startswith(folder + "/"):
+            continue
+        n = r.rsplit("/", 1)[1]
+        mm = re.match(r"(?i)img_([eo]?)(\d+)\.(\w+)$", n)
+        if not mm or mm.group(2) != num:
+            continue
+        ext = mm.group(3).lower()
+        if edited or ext in ("aae", "mov") or mm.group(1):  # Live-видео, файл правок, правленая копия
+            out.append(r)
+    return out
+
+
+# ============================================================ библиотека телефона
+
+class PhoneLibrary(Library):
+    kind = "phone"
+
+    def __init__(self, device, data_dir: Path):
+        d = data_dir / "phones" / device.key
+        super().__init__(d / "mirror", data_dir, lib_dir=d)
+        (d / "name.txt").write_text(device.name, encoding="utf-8")
+        with self.connect() as c:
+            c.execute("CREATE TABLE IF NOT EXISTS objcache(id TEXT PRIMARY KEY, data TEXT)")
+        self.device = device
+        self.allow_copy = False  # пользователь разрешил копировать много файлов
+        self._sizes: dict[str, int] = {}
+        self._taken: dict[str, float | None] = {}
+
+    @property
+    def title(self) -> str:
+        return self.device.name
+
+    def trash_target(self) -> str:
+        return "phone"
+
+    # ---- сканирование
+    def _walk(self):
+        self._set(message="Чтение списка файлов с телефона…")
+        lst = list_with_cache(self.device, self.db_path,
+                              lambda n, total, first: self._set(
+                                  phase="list", done=n, total=total,
+                                  message="Чтение списка с телефона" + (" (первый раз — долго)" if first else "")))
+        self._set(phase="walk", total=0, done=0)
+        files = []
+        for rel, size, mtime, _taken in lst:
+            ext = os.path.splitext(rel)[1].lower()
+            if ext in LIST_EXT:
+                files.append((rel, self.root / rel, size, mtime, ext))
+        self._sizes = {f[0]: f[1] for f in lst}
+        self._taken = {f[0]: f[3] for f in lst}
+        total = sum(f[1] for f in lst)
+        self._set(folder_size=total, folder_files=len(lst))
+        self.save_settings({"folder_size": total, "folder_files": len(lst)})
+        return files
+
+    def _prepare(self, todo: list[tuple]) -> None:
+        self._quick_match(todo)
+        need = [t[1] for t in todo if not (self.root / t[1]).exists()]
+        if not need:
+            return
+        need_bytes = sum(self._sizes.get(r, 0) for r in need)
+        if not self.allow_copy and (len(need) > COPY_LIMIT_FILES or need_bytes > COPY_LIMIT_BYTES):
+            # Скорее всего, папка облака ещё не открыта в программе — не копируем весь телефон молча
+            self._set(phase="confirm", total=len(need), done=0, copy_bytes=need_bytes,
+                      message=f"С облаком не совпало {len(need)} файлов — нужно подтверждение")
+            self._cancel.set()
+            return
+        self._set(phase="copy", total=len(need), done=0, message="Копирование с телефона…")
+        for i in range(0, len(need), 100):
+            if self._cancel.is_set():
+                return
+            base = i
+            self.device.fetch(need[i:i + 100], self.root, lambda n: self._set(done=base + n))
+
+    def _quick_match(self, todo: list[tuple]) -> None:
+        """Снимки, чья копия уже есть в облаке (тот же размер и дата), не копируем с телефона:
+        данные и миниатюру берём у копии из облака. todo изменяется на месте."""
+        if not todo:
+            return
+        self._set(phase="match", message="Сверка списка файлов с облаком…")
+        roots = self.ref_roots()
+        refs = matching.load_refs(self.data_dir, set(roots) if roots is not None else None, self.journal.fingerprints())
+        by_size: dict[int, list] = {}
+        for r in refs:
+            if r.size:
+                by_size.setdefault(r.size, []).append(r)
+        rest = []
+        with self.connect() as c:
+            for t in todo:
+                mid, rel, _, ext, kind = t
+                ref = matching.quick_match(self._sizes.get(rel, 0), self._taken.get(rel), by_size)
+                if ref is None or ref.kind != kind:
+                    rest.append(t)
+                    continue
+                c.execute(
+                    """UPDATE media SET width=?, height=?, ts=?, ts_source=?, model=?, duration=?, phash=?, dhash=?,
+                       sha1=?, category=?, analyzed=1, error=NULL WHERE id=?""",
+                    (ref.width, ref.height, ref.ts, ref.ts_source, ref.model, ref.duration, ref.phash, ref.dhash,
+                     ref.sha1, ref.category or ("video" if kind == "video" else "photo"), mid))
+                thumb = matching.ref_thumb(ref, self.journal)
+                if thumb:
+                    c.execute("INSERT OR REPLACE INTO thumbs(id, data) VALUES(?, ?)", (mid, thumb))
+        self._set(message=f"Уже есть в облаке: {len(todo) - len(rest)}")
+        todo[:] = rest
+
+    def local_path(self, rel: str) -> Path:
+        p = self.root / rel
+        if not p.exists():
+            self.device.fetch([rel], self.root)
+        return p
+
+    def after_scan(self) -> None:
+        self._set(phase="match", message="Сверка с облаком…")
+        self.rematch(premark=True)
+        self._prune_mirror()
+
+    # ---- сверка
+    def ref_roots(self) -> list[str] | None:
+        with self.connect() as c:
+            r = c.execute("SELECT value FROM settings WHERE key='ref_roots'").fetchone()
+        return json.loads(r[0]) if r else None
+
+    def set_ref_roots(self, roots: list[str] | None) -> None:
+        with self.connect() as c:
+            if roots is None:
+                c.execute("DELETE FROM settings WHERE key='ref_roots'")
+            else:
+                c.execute("INSERT INTO settings(key, value) VALUES('ref_roots', ?) "
+                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(roots, ensure_ascii=False),))
+
+    def rematch(self, premark: bool = True) -> dict:
+        roots = self.ref_roots()
+        refs = matching.load_refs(self.data_dir, set(roots) if roots is not None else None, self.journal.fingerprints())
+        with self.connect() as c:
+            rows = [dict(r) for r in c.execute(
+                """SELECT id, kind, ts, ts_source, model, width, height, duration, size, sha1, phash, dhash, status, match
+                   FROM media WHERE parent_id IS NULL AND analyzed=1""")]
+            res = matching.match(rows, refs)
+            marked = []
+            for r in rows:
+                m = res.get(r["id"])
+                group, ref, strong = m if m else ("new", None, None)
+                c.execute("UPDATE media SET match=?, match_ref=?, match_strong=? WHERE id=?",
+                          (group, ref, int(bool(strong)) if m else None, r["id"]))
+                # Удалённые в облаке — сразу к удалению (только при надёжном совпадении и если это новость)
+                if premark and group == "deleted" and strong and r["status"] == 0 and r["match"] != "deleted":
+                    marked.append(r["id"])
+            for mid in marked:
+                c.execute("UPDATE media SET status=? WHERE id=? OR parent_id=?", (STATUS_REJECT, mid, mid))
+        self.status["version"] += 1
+        counts = {"deleted": 0, "cloud": 0, "new": 0}
+        for r in rows:
+            counts[res[r["id"]][0] if r["id"] in res else "new"] += 1
+        counts["premarked"] = len(marked)
+        counts["refs"] = len(refs)
+        return counts
+
+    def _prune_mirror(self) -> None:
+        """Копии снимков, которые уже есть в облаке или удалены там, на компьютере не нужны."""
+        with self.connect() as c:
+            rows = c.execute(
+                """SELECT m.path FROM media m LEFT JOIN media p ON p.id = m.parent_id
+                   WHERE COALESCE(p.match, m.match) IN ('cloud', 'deleted')""").fetchall()
+        for r in rows:
+            (self.root / r["path"]).unlink(missing_ok=True)
+
+    # ---- удаление с телефона
+    def _remove(self, rows: list[dict]) -> tuple[list[int], list[str], int]:
+        groups = {r["id"]: r["match"] for r in rows if r["parent_id"] is None}
+        errors: list[str] = []
+        to_delete: list[dict] = []
+        for r in rows:
+            group = r["match"] if r["parent_id"] is None else groups.get(r["parent_id"])
+            local = self.root / r["path"]
+            if group not in ("cloud", "deleted"):
+                # Этого снимка нет в облаке: перед удалением с телефона кладём копию в Корзину Windows
+                try:
+                    self.local_path(r["path"])
+                    send2trash(str(local))
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{r['path']}: не удалось сохранить копию в Корзину, файл не тронут ({e})")
+                    continue
+            to_delete.append(r)
+        result = self.device.delete([r["path"] for r in to_delete]) if to_delete else {}
+        removed, freed = [], 0
+        for r in to_delete:
+            err = result.get(r["path"])
+            if err:
+                errors.append(f"{r['path']}: {err}")
+                continue
+            removed.append(r["id"])
+            freed += self._sizes.get(r["path"], r["size"] or 0)
+            (self.root / r["path"]).unlink(missing_ok=True)
+        return removed, errors, freed

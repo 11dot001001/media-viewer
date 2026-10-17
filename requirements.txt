@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn>=0.30
+pillow>=11
+numpy>=2.0
+pillow-heif>=0.18
+rawpy>=0.22
+send2trash>=1.8
+comtypes>=1.4; sys_platform == 'win32'
+pywin32>=306; sys_platform == 'win32'
