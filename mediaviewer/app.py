@@ -27,6 +27,15 @@ RECENT_FILE = DATA / "recent.json"
 
 app = FastAPI(title="Media Viewer")
 app.add_middleware(GZipMiddleware, minimum_size=2048)
+
+
+@app.middleware("http")
+async def no_stale_ui(request, call_next):
+    """Интерфейс (app.js, style.css) браузер должен перепроверять: иначе после обновления остаётся старая версия."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _lib: Library | None = None
@@ -98,7 +107,12 @@ class SettingsReq(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+    # к ссылкам на app.js и style.css добавляем версию файла — браузер не возьмёт старую копию из кэша
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        v = int((STATIC / name).stat().st_mtime)
+        html = html.replace(f"/static/{name}\"", f"/static/{name}?v={v}\"")
+    return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/state")
