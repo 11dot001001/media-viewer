@@ -519,26 +519,37 @@ class Library:
             for r in rows:
                 if r["parent_id"] is None and self.finder.found.get(r["id"]):
                     p = self.root / r["path"]
-                    if p.is_file():
-                        hashes[r["id"]] = self._sha1(p)
+                    try:
+                        if p.is_file():
+                            hashes[r["id"]] = self._sha1(p)
+                    except OSError:
+                        pass  # не прочитался (например, не скачан из облака) — его копию на телефоне не трогаем
         removed, errors, freed = self._remove(rows)
         phone_res = None
         if phone:
             # С телефона — только то, что уже ушло из облака в Корзину (копия остаётся восстановимой)
             result: dict[str, str | None] = {}
-            phone_sizes = {rel: e[1] for rel, e in self.finder.device._ids.items()}
+            device = self.finder.device
+            device.broken = False
+            phone_sizes = {rel: e[1] for rel, e in device._ids.items()}
             for i in removed:
                 main = self.finder.found.get(i)
                 if not main:
                     continue
+                if result.get(main, "") is None:
+                    # уже удалён вместе с другим снимком: IMG_E1234.JPG (правка) и IMG_1234.PNG — одна съёмка,
+                    # а в облаке лежали оба. Сверку SHA-1 он прошёл при поиске.
+                    self.finder.found.pop(i, None)
+                    continue
                 if i not in hashes:
                     result[main] = "нет файла из облака для сверки — не тронут"
                     continue
-                r1 = self.finder.device.delete([main], {main: hashes[i]})
+                r1 = device.delete([main], {main: hashes[i]})
                 result.update(r1)
-                if r1.get(main) is None and self.finder.extra.get(i):
+                extra = [rel for rel in self.finder.extra.get(i, []) if result.get(rel, "") is not None]
+                if r1.get(main) is None and extra:
                     # Live-видео и правки — только если сам снимок прошёл сверку и удалён
-                    result.update(self.finder.device.delete(self.finder.extra[i]))
+                    result.update(device.delete(extra))
                 self.finder.found.pop(i, None)
             done = [k for k, v in result.items() if v is None]
             phone_res = {"removed": len(done), "freed": sum(phone_sizes.get(k, 0) for k in done),

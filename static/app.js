@@ -68,6 +68,7 @@ function toast(msg, err = false, ms = 3800) {
   el.innerHTML = msg;
   $('#toasts').appendChild(el);
   setTimeout(() => el.remove(), ms);
+  return el;
 }
 
 function confirmModal(title, html, okText = 'OK', danger = false, cancel = true) {
@@ -1357,6 +1358,7 @@ async function onAction(act, el) {
     case 'phone-find': phoneFind(); break;
     case 'stats-more': statsModal(); break;
     case 'phone-find-all': phoneFind(true); break;
+    case 'phone-find-wide': phoneFind(false, true); break;
     case 'fold': setFolded([el.dataset.key], !S.folded.has(el.dataset.key)); break;
     case 'fold-all': setView('grid'); setFolded(new Set(gridList().map(groupKey)), true); break;
     case 'unfold-all': setView('grid'); setFolded([...S.folded], false); break;
@@ -1391,8 +1393,11 @@ async function emptyTrash() {
     'Удалить', true);
   if (!ok) return;
   const delPhone = !!(onPhone && $('#delPhone')?.checked);
+  // удаление может идти минутами (с телефона каждый файл читается целиком для сверки) — сообщение висит до конца
+  const busy = toast(`<span class="spin"></span> ${delPhone
+    ? `Удаляю ${plural(onPhone, 'файл', 'файла', 'файлов')} с телефона — не отключайте и не блокируйте его…`
+    : 'Удаляю…'}`, false, 24 * 3600 * 1000);
   try {
-    if (delPhone) toast('Удаляю с телефона — не отключайте его…', false, 3000);
     const r = await api('/api/trash/empty', { phone: delPhone });
     S.undo = [];
     toast(`Удалено: ${plural(r.removed, 'файл', 'файла', 'файлов')}, освобождено ${fmtSize(r.freed)}` +
@@ -1400,9 +1405,12 @@ async function emptyTrash() {
     S.stats = null;
     if (r.errors?.length) toast('Не удалось удалить:<br>' + r.errors.slice(0, 5).map(esc).join('<br>'), true, 10000);
     if (r.phone?.errors?.length) toast('С телефона не удалось удалить:<br>' + r.phone.errors.slice(0, 5).map(esc).join('<br>'), true, 12000);
+    busy.remove();
     await loadItems();
   } catch (e) {
     toast(esc(e.message), true);
+  } finally {
+    busy.remove();
   }
 }
 
@@ -1471,7 +1479,8 @@ function findBarHTML() {
   } else if (f.phase === 'done') {
     const scope = f.scope === 'months' ? ` Искал в папках за ${plural(f.months.length, 'месяц', 'месяца', 'месяцев')} съёмки этих файлов.` : '';
     const more = f.scope === 'months' && f.found < f.checked
-      ? ' <button class="link" data-act="phone-find-all">Искать по всему телефону (долго)</button>' : '';
+      ? (f.wide ? '' : ' <button class="link" data-act="phone-find-wide" title="Для не найденных проверить все снимки телефона ±26 часов от даты съёмки — на случай сдвига часового пояса. Читает с телефона намного больше файлов.">Искать шире (±26 ч)</button>') +
+        ' <button class="link" data-act="phone-find-all">Искать по всему телефону (долго)</button>' : '';
     const locked = f.unreadable ? ` <span style="color:var(--warn)"><b>${plural(f.unreadable, 'файл', 'файла', 'файлов')} не удалось прочитать с телефона</b> — похоже, iPhone заблокировался. Разблокируйте его, не давайте экрану погаснуть и нажмите «Найти на телефоне» ещё раз.</span>` : '';
     const mis = f.mismatch ? ` У ${plural(f.mismatch, 'файла', 'файлов', 'файлов')} совпали размер и дата, но не содержимое — их не удалим.` : '';
     const pairs = f.found ? ' <button class="link" data-act="ph-filter" data-v="found">Проверить пары «облако ↔ iPhone»</button>' : '';
@@ -1569,9 +1578,9 @@ async function statsModal() {
 }
 
 let findTimer = null;
-async function phoneFind(everywhere = false) {
+async function phoneFind(everywhere = false, wide = false) {
   try {
-    S.find = await api('/api/phone-find', { everywhere });
+    S.find = await api('/api/phone-find', { everywhere, wide });
   } catch (e) { toast(esc(e.message), true); return; }
   pollFind();
 }

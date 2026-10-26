@@ -84,6 +84,7 @@ class WpdDevice:
         self.name = name or "Телефон"
         self.key = "wpd-" + hashlib.sha1((serial or device_id).lower().encode()).hexdigest()[:10]
         self._ids: dict[str, tuple[str, int, str]] = {}  # rel -> (id объекта, размер, id папки)
+        self.broken = False  # чтение файла для сверки сорвалось: связь с телефоном ненадёжна, дальше не удаляем
 
     def _conn(self):
         from . import wpd
@@ -190,14 +191,23 @@ class WpdDevice:
 
     def delete(self, rels: list[str], hashes: dict[str, str] | None = None) -> dict[str, str | None]:
         """Удаление по одному файлу. Перед каждым — сверка имени и размера с устройством, а если известен
-        SHA-1 файла из облака — файл на телефоне читается целиком и сверяется. После — проверка, что файла нет."""
+        SHA-1 файла из облака — файл на телефоне читается целиком и сверяется. После — проверка, что файла нет.
+
+        Удаляются только файлы, которые уже есть в списке (_ids) — найденные поиском или прочитанные обходом.
+        Список заново не читается: на iPhone это полчаса. После первого сбоя чтения (self.broken) ничего
+        больше не удаляется — ни в этом вызове, ни в следующих."""
         from . import wpd
 
-        self._ensure_ids(rels)
         res: dict[str, str | None] = {}
         with self._lock:
-            c = wpd.Connection(self.device_id)  # свежее подключение — без устаревших данных
+            c = wpd.Connection(self.device_id) if not self.broken else None  # свежее подключение
             for rel in rels:
+                if self.broken:
+                    res[rel] = "связь с телефоном прервалась при сверке — не тронут"
+                    continue
+                if rel not in self._ids:
+                    res[rel] = "нет в списке найденных на телефоне — не тронут"
+                    continue
                 oid, err = self._checked_id(c, rel)
                 if err:
                     res[rel] = err
@@ -208,7 +218,8 @@ class WpdDevice:
                         actual = c.sha1(oid, self._ids[rel][1])
                     except Exception as e:  # noqa: BLE001
                         res[rel] = f"не удалось прочитать файл для сверки — не тронут ({e})"
-                        break  # после сбоя чтения связь с телефоном может быть нарушена — дальше не идём
+                        self.broken = True  # связь с телефоном может быть нарушена — дальше не идём
+                        continue
                     if actual != expected:
                         res[rel] = "содержимое не совпало с облаком — не тронут"
                         continue
@@ -441,6 +452,7 @@ class PhoneLibrary(Library):
                 if cand and cand.is_file() and cand.stat().st_size == self._sizes.get(r["path"], -1):
                     hashes[r["path"]] = self._sha1(cand)
                     break
+        self.device.broken = False
         result = self.device.delete([r["path"] for r in to_delete], hashes) if to_delete else {}
         removed, freed = [], 0
         for r in to_delete:

@@ -170,6 +170,7 @@ def api_open_phone(req: PhoneReq):
 
 class FindReq(BaseModel):
     everywhere: bool = False
+    wide: bool = False  # поиск по дате с окном ±26 ч для не найденных
 
 
 @app.post("/api/phone-find")
@@ -178,7 +179,7 @@ def phone_find_start(req: FindReq | None = None):
     if lb.kind != "folder":
         raise HTTPException(409, "Поиск на телефоне — из корзины папки облака")
     if lb.finder is None or not lb.finder.running:
-        lb.finder = PhoneFinder(lb, DATA, everywhere=bool(req and req.everywhere))
+        lb.finder = PhoneFinder(lb, DATA, everywhere=bool(req and req.everywhere), wide=bool(req and req.wide))
         lb.finder.start()
     return lb.finder.status
 
