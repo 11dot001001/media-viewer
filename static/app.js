@@ -441,18 +441,100 @@ function daysHTML(list, o = {}) {
       (folded ? '' : `<button class="link" data-day="${k}">${groupSelectLabel(k)}</button>`) +
       `</div>`;
     if (folded) { html += '</section>'; continue; }
-    html += '<div class="tiles">';
-    items.forEach((it, i) => {
-      html += tileHTML(it, {
-        prevSer: i > 0 && it.s && items[i - 1].s === it.s,
-        nextSer: i < items.length - 1 && it.s && items[i + 1].s === it.s,
-        stack: o.collapse && it.s,
-        noSeries: o.noSeries,
-      });
-    });
-    html += '</div></section>';
+    if (o.lazy) {
+      // блоки по целому числу рядов: заглушка той же высоты, ряды не рвутся на стыке блоков
+      const per = Math.max(1, Math.ceil(LAZY_TILES / S.cols)) * S.cols;
+      for (let from = 0; from < items.length; from += per) {
+        const ch = { items, from, to: Math.min(items.length, from + per), o };
+        const n = o.lazy.chunks.push(ch) - 1;
+        for (let i = from; i < ch.to; i++) o.lazy.byId.set(items[i].id, n);
+        html += `<div class="tiles lazy" data-chunk="${n}" style="height:${chunkHeight(ch)}"></div>`;
+      }
+    } else {
+      html += `<div class="tiles">${tilesHTML(items, 0, items.length, o)}</div>`;
+    }
+    html += '</section>';
   }
   return html;
+}
+
+function tilesHTML(items, from, to, o) {
+  let html = '';
+  for (let i = from; i < to; i++) {
+    const it = items[i];
+    html += tileHTML(it, {
+      prevSer: i > 0 && it.s && items[i - 1].s === it.s,
+      nextSer: i < items.length - 1 && it.s && items[i + 1].s === it.s,
+      stack: o.collapse && it.s,
+      noSeries: o.noSeries,
+    });
+  }
+  return html;
+}
+
+// ============================================================ ленивая лента
+// В папке бывают десятки тысяч снимков. В DOM держим только блоки плиток рядом с экраном,
+// остальные — пустые заглушки точной высоты (в ряду ровно S.cols плиток, см. layoutTiles).
+const LAZY_TILES = 150;
+const LAZY_MARGIN = 1500;  // px над и под экраном, где блоки уже заполнены
+
+function chunkHeight(ch) {
+  const rows = Math.ceil((ch.to - ch.from) / S.cols);
+  return `calc(${rows} * var(--thumb) + ${rows - 1} * var(--gap, 4px) + 2px)`;
+}
+
+/** Начать ленивую отрисовку view: daysHTML заполнит chunks, attachLazy подключит прокрутку. */
+function newLazy(view) {
+  view.lazy = { chunks: [], byId: new Map() };
+  return view.lazy;
+}
+
+function attachLazy(view) {
+  view.lazyObs?.disconnect();
+  if (!view.lazyObs) {
+    view.lazyObs = new IntersectionObserver(entries => {
+      for (const en of entries) (en.isIntersecting ? fillChunk : emptyChunk)(view, en.target);
+    }, { root: view, rootMargin: `${LAZY_MARGIN}px 0px` });
+  }
+  fillVisible(view);
+  for (const box of $$('.tiles[data-chunk]', view)) view.lazyObs.observe(box);
+}
+
+function fillChunk(view, box) {
+  if (!box.classList.contains('lazy')) return;
+  const ch = view.lazy?.chunks[box.dataset.chunk];
+  if (!ch) return;
+  box.innerHTML = tilesHTML(ch.items, ch.from, ch.to, ch.o);
+  box.classList.remove('lazy');
+  box.style.height = '';
+}
+
+function emptyChunk(view, box) {
+  const ch = view.lazy?.chunks[box.dataset.chunk];
+  if (!ch || box.classList.contains('lazy') || box.contains(document.activeElement)) return;
+  box.style.height = chunkHeight(ch);
+  box.classList.add('lazy');
+  box.textContent = '';
+}
+
+/** Сразу заполнить блоки у экрана — иначе после перерисовки на кадр мелькнёт пустая лента. */
+function fillVisible(view) {
+  if (!view.lazy) return;
+  const r = view.getBoundingClientRect();
+  for (const box of $$('.tiles.lazy', view)) {
+    const b = box.getBoundingClientRect();
+    if (b.bottom >= r.top - LAZY_MARGIN && b.top <= r.bottom + LAZY_MARGIN) fillChunk(view, box);
+  }
+}
+
+/** Гарантировать, что плитка (и соседние блоки — для перехода по рядам) есть в DOM. */
+function ensureTile(view, id) {
+  const n = view.lazy?.byId.get(id);
+  if (n == null) return;
+  for (const k of [n - 1, n, n + 1]) {
+    const box = $(`.tiles[data-chunk="${k}"]`, view);
+    if (box) fillChunk(view, box);
+  }
 }
 
 function emptyHTML(title, text) {
@@ -483,7 +565,9 @@ function renderGrid() {
     el.innerHTML = emptyHTML(wasScanning ? 'Идёт сканирование…' : 'Здесь пока пусто', 'Фото и видео появятся по мере анализа.');
     return;
   }
-  el.innerHTML = full.length ? daysHTML(full, { collapse: S.collapse, foldable: true }) : emptyHTML('Ничего не найдено', 'Измените фильтры слева.');
+  el.innerHTML = full.length ? daysHTML(full, { collapse: S.collapse, foldable: true, lazy: newLazy(el) })
+    : emptyHTML('Ничего не найдено', 'Измените фильтры слева.');
+  attachLazy(el);
 }
 
 function setFolded(keys, on) {
@@ -595,9 +679,10 @@ function renderTrash() {
   } else {
     html += `<div class="trash-bar">${where} Клавиша <kbd>U</kbd> или <kbd>P</kbd> — вернуть выбранные.</div>` + findBarHTML() + phoneSeg +
       (!S.list.length ? emptyHTML('Таких файлов нет')
-        : S.phoneFilter === 'found' ? pairsHTML(S.list) : daysHTML(S.list, { noSeries: true }));
+        : S.phoneFilter === 'found' ? pairsHTML(S.list) : daysHTML(S.list, { noSeries: true, lazy: newLazy(el) }));
   }
   el.innerHTML = html;
+  attachLazy(el);
 }
 
 // ============================================================ карта
@@ -666,13 +751,15 @@ function updateMapStrip() {
 }
 
 // ============================================================ выделение и статусы
-function tileEls(id) { return $$(`.tile[data-id="${id}"], .ft[data-id="${id}"]`); }
+// Плитки, которые сейчас в DOM (лента ленивая — остальные нарисуются уже с актуальными отметками)
+const renderedTiles = () => $$('.tile[data-id], .ft[data-id]');
 
 function setFocus(id, scroll = true) {
   $$('.tile.focus').forEach(el => el.classList.remove('focus'));
   S.focus = id;
   if (id == null) return;
   const view = $('#view-' + S.view);
+  if (view) ensureTile(view, id);
   const el = view && $(`.tile[data-id="${id}"]`, view);
   if (el) {
     el.classList.add('focus');
@@ -681,16 +768,17 @@ function setFocus(id, scroll = true) {
 }
 
 function refreshSelection() {
-  $$('.tile.sel').forEach(el => el.classList.remove('sel'));
-  for (const id of S.selected) tileEls(id).forEach(el => el.classList.add('sel'));
+  for (const el of renderedTiles()) el.classList.toggle('sel', S.selected.has(+el.dataset.id));
   updateSelInfo();
 }
 
 function refreshTiles(ids) {
-  for (const id of ids) {
-    const it = S.byId.get(id);
+  ids = new Set(ids);
+  for (const el of renderedTiles()) {
+    const it = ids.has(+el.dataset.id) && S.byId.get(+el.dataset.id);
     if (!it) continue;
-    tileEls(id).forEach(el => { el.classList.remove('st-0', 'st-1', 'st-2'); el.classList.add('st-' + it.st); });
+    el.classList.remove('st-0', 'st-1', 'st-2');
+    el.classList.add('st-' + it.st);
   }
 }
 
@@ -722,6 +810,7 @@ function rerenderKeepScroll() {
   const top = el.scrollTop;
   render();
   el.scrollTop = top;
+  fillVisible(el);
   if (S.focus) setFocus(S.focus, false);
   refreshSelection();
 }
@@ -775,6 +864,7 @@ function moveFocus(dir, extend) {
   else if (dir === 'end') idx = list.length - 1;
   else {
     const view = $('#view-' + S.view);
+    ensureTile(view, S.focus);
     const cur = $(`.tile[data-id="${S.focus}"]`, view);
     if (!cur) return;
     const els = $$('.tiles > .tile', view);
@@ -1780,17 +1870,19 @@ function setCols(n, point) {
   S.cols = n;
   prefs.set('cols', n);
   layoutTiles();
-  const rerendered = granularity() !== before;
+  // ленивая лента нарезана на блоки по целому числу рядов — при другом числе колонок её надо перестроить
+  const rerendered = granularity() !== before || scrollable;
   if (rerendered) render();
   if (!anchor) return;
   const fix = () => {
+    ensureTile(view, +anchor);
     const el = view.querySelector(`.tile[data-id="${anchor}"]`);
-    // несколько проходов: после прокрутки браузер раскладывает ставшие видимыми блоки (content-visibility)
     for (let i = 0; el && i < 4; i++) {
       const d = el.getBoundingClientRect().top - view.getBoundingClientRect().top - offset;
       if (Math.abs(d) < 1) break;
       view.scrollTop += d;
     }
+    fillVisible(view);
   };
   fix();
   // после перерисовки настоящая высота блоков известна только со следующего кадра

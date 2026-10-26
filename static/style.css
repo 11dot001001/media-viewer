@@ -245,6 +245,8 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 .day-head .link { opacity: 0; transition: opacity .15s; }
 .day:hover .day-head .link { opacity: 1; }
 .tiles { display: flex; flex-wrap: wrap; gap: var(--gap, 4px); padding-top: 2px; }
+/* ленивая лента: соседние блоки одного дня стыкуются так же, как ряды внутри блока */
+.tiles + .tiles { margin-top: calc(var(--gap, 4px) - 2px); }
 .tile {
   position: relative; width: var(--thumb); height: var(--thumb); border-radius: 10px; overflow: visible;
   background: var(--surface-2); cursor: pointer; flex: none; outline: none;
