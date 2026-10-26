@@ -295,6 +295,7 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 .bdg.dup { background: var(--violet); color: #1d0f38; }
 .bdg.cx { background: rgba(124, 135, 255, .85); }
 .bdg.err { background: var(--reject); }
+.bdg.offline { background: rgba(120, 128, 148, .85); }
 .tile .vid-dur { position: absolute; right: 6px; bottom: 6px; z-index: 2; }
 #view-trash .tile.st-2 img { opacity: 1; filter: none; }
 #view-trash .tile.st-2::after { top: auto; left: auto; right: 7px; bottom: 7px; transform: none; width: 22px; height: 22px; font-size: 11px; }

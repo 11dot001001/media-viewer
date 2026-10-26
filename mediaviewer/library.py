@@ -18,6 +18,17 @@ from .journal import Journal
 
 SKIP_DIRS = {trash.REJECTED_DIR, "$RECYCLE.BIN", "System Volume Information", ".thumbnails", ".trashed", "@eaDir"}
 
+# Файл облака (Яндекс.Диск, OneDrive), не скачанный на компьютер: RECALL_ON_DATA_ACCESS | RECALL_ON_OPEN | OFFLINE.
+# Чтение такого файла запускает скачивание и висит десятки секунд, а при сбое кончается ошибкой.
+CLOUD_ONLY_ATTRS = 0x400000 | 0x40000 | 0x1000
+
+
+def cloud_only(p: Path) -> bool:
+    try:
+        return bool(getattr(p.stat(), "st_file_attributes", 0) & CLOUD_ONLY_ATTRS)
+    except OSError:
+        return False
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS media(
   id INTEGER PRIMARY KEY,
@@ -34,7 +45,8 @@ CREATE TABLE IF NOT EXISTS media(
   dup_id INTEGER, dup_best INTEGER NOT NULL DEFAULT 0, dup_exact INTEGER NOT NULL DEFAULT 0,
   analyzed INTEGER NOT NULL DEFAULT 0,
   error TEXT,
-  match TEXT, match_ref TEXT, match_strong INTEGER
+  match TEXT, match_ref TEXT, match_strong INTEGER,
+  cloud INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_parent ON media(parent_id);
 CREATE INDEX IF NOT EXISTS ix_size ON media(size);
@@ -84,12 +96,14 @@ class Library:
         self._thread: threading.Thread | None = None
         self._group_lock = threading.Lock()
         self.finder = None  # PhoneFinder: поиск файлов корзины на телефоне
+        self._offline: set[str] = set()  # файлы, которые лежат только в облаке (см. CLOUD_ONLY_ATTRS)
         self.status = {"phase": "idle", "total": 0, "done": 0, "message": "", "errors": 0, "started": 0, "version": 0,
-                       "folder_size": None, "folder_files": None}
+                       "folder_size": None, "folder_files": None, "cloud": 0}
         with self.connect() as c:
             c.executescript(SCHEMA)
             cols = {r["name"] for r in c.execute("PRAGMA table_info(media)")}
-            for col, typ in (("match", "TEXT"), ("match_ref", "TEXT"), ("match_strong", "INTEGER")):
+            for col, typ in (("match", "TEXT"), ("match_ref", "TEXT"), ("match_strong", "INTEGER"),
+                             ("cloud", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in cols:  # индекс от прошлой версии
                     c.execute(f"ALTER TABLE media ADD COLUMN {col} {typ}")
             for row in c.execute("SELECT key, value FROM settings WHERE key IN ('folder_size', 'folder_files')"):
@@ -178,6 +192,7 @@ class Library:
     def _walk(self) -> list[tuple[str, Path, int, float, str]]:
         """Обход папки. Попутно считает размер всей папки (на Windows stat из scandir бесплатный)."""
         files = []
+        self._offline = set()
         total_size = total_files = 0
         stack = [self.root]
         while stack:
@@ -203,7 +218,10 @@ class Library:
                 if ext not in media.ALL_EXT or e.name.startswith("._"):
                     continue
                 p = Path(e.path)
-                files.append((p.relative_to(self.root).as_posix(), p, st.st_size, st.st_mtime, ext))
+                rel = p.relative_to(self.root).as_posix()
+                if getattr(st, "st_file_attributes", 0) & CLOUD_ONLY_ATTRS:
+                    self._offline.add(rel)
+                files.append((rel, p, st.st_size, st.st_mtime, ext))
             self._set(message=f"Найдено файлов: {len(files)}")
         self._set(folder_size=total_size, folder_files=total_files)
         self.save_settings({"folder_size": total_size, "folder_files": total_files})
@@ -235,7 +253,8 @@ class Library:
         files = [f for f in files if f[4] in media.ALL_EXT or f[0] in parent_of]
         on_disk = {f[0] for f in files}
         with self.connect() as c:
-            existing = {r["path"]: r for r in c.execute("SELECT id, path, size, mtime, analyzed, parent_id FROM media")}
+            existing = {r["path"]: r for r in c.execute(
+                "SELECT id, path, size, mtime, analyzed, parent_id, cloud, error IS NOT NULL AS failed FROM media")}
             gone = [r["id"] for p, r in existing.items() if p not in on_disk]
             for i in range(0, len(gone), 500):
                 chunk = gone[i:i + 500]
@@ -244,6 +263,7 @@ class Library:
                 c.execute(f"DELETE FROM thumbs WHERE id IN ({q})", chunk)
 
             todo: list[tuple[int, str, Path, str, str]] = []
+            in_cloud: list[tuple[int, str, Path, str, str]] = []
             primaries = [f for f in files if f[0] not in parent_of]
             children = [f for f in files if f[0] in parent_of]
             ids: dict[str, int] = {}
@@ -259,8 +279,13 @@ class Library:
                            mtime=excluded.mtime, parent_id=NULL, analyzed=0, sha1=NULL""",
                         (rel, kind, ext, size, mtime))
                 ids[rel] = c.execute("SELECT id FROM media WHERE path=?", (rel,)).fetchone()[0]
-                if changed or not old["analyzed"]:
-                    todo.append((ids[rel], rel, p, ext, kind))
+                # failed: прошлые версии пытались читать такие файлы и записывали ошибку
+                if changed or not old["analyzed"] or old["cloud"] or (old["failed"] and rel in self._offline):
+                    # Не скачанный из облака файл не читаем; уже разобранный и выгруженный обратно в облако — оставляем как есть
+                    (in_cloud if rel in self._offline else todo).append((ids[rel], rel, p, ext, kind))
+            for t in in_cloud:
+                self._store(c, t[0], self._analyze(*t, cloud=True))
+            self.status["cloud"] = len(in_cloud)
             for rel, p, size, mtime, ext in children:
                 c.execute(
                     """INSERT INTO media(path, kind, ext, size, mtime, parent_id, analyzed)
@@ -277,7 +302,8 @@ class Library:
         # Анализ новых/изменённых файлов в пуле потоков (Pillow и ffmpeg отпускают GIL)
         self._set(phase="analyze", total=len(todo), done=0, message="Анализ файлов…")
         if todo:
-            workers = max(2, min(8, (os.cpu_count() or 4)))
+            # Больше 16 потоков не ускоряет: упирается в GIL на мелких операциях numpy/Pillow
+            workers = max(2, min(16, (os.cpu_count() or 4)))
             with ThreadPoolExecutor(workers) as ex, self.connect() as c:
                 futs = {ex.submit(self._analyze, *t): t for t in todo}
                 n = 0
@@ -302,9 +328,10 @@ class Library:
         # Точные дубликаты: SHA-1 только для файлов, у которых совпадает размер
         self._set(phase="hash", message="Поиск точных копий…")
         with self.connect() as c:
-            rows = c.execute(
+            rows = [r for r in c.execute(
                 """SELECT id, path FROM media WHERE parent_id IS NULL AND sha1 IS NULL AND size IN
-                   (SELECT size FROM media WHERE parent_id IS NULL GROUP BY size HAVING COUNT(*) > 1)""").fetchall()
+                   (SELECT size FROM media WHERE parent_id IS NULL GROUP BY size HAVING COUNT(*) > 1)""")
+                    if r["path"] not in self._offline]
         self._set(total=len(rows), done=0)
         if rows:
             with ThreadPoolExecutor(4) as ex, self.connect() as c:
@@ -331,17 +358,24 @@ class Library:
                 h.update(chunk)
         return h.hexdigest()
 
-    def _analyze(self, mid: int, rel: str, p: Path, ext: str, kind: str) -> dict:
-        try:
-            info = media.analyze_video(p) if kind == "video" else media.analyze_image(p, ext)
+    def _analyze(self, mid: int, rel: str, p: Path, ext: str, kind: str, cloud: bool = False) -> dict:
+        empty = ("width", "height", "ts", "make", "model", "software", "lat", "lon", "duration",
+                 "phash", "dhash", "sharpness", "thumb")
+        if cloud:
+            # Файл только в облаке: дата — из имени или mtime, остальное — когда он скачается (cloud=1)
+            info = dict.fromkeys(empty)
             info["error"] = None
-        except Exception as e:  # noqa: BLE001 — файл не читается, но в списке он должен остаться
-            msg = str(e)
-            if msg.startswith(("b'", 'b"')):
-                msg = msg[2:-1]
-            info = dict.fromkeys(("width", "height", "ts", "make", "model", "software", "lat", "lon", "duration",
-                                  "phash", "dhash", "sharpness", "thumb"))
-            info["error"] = f"Не удалось прочитать: {msg}"[:300]
+        else:
+            try:
+                info = media.analyze_video(p) if kind == "video" else media.analyze_image(p, ext)
+                info["error"] = None
+            except Exception as e:  # noqa: BLE001 — файл не читается, но в списке он должен остаться
+                msg = str(e)
+                if msg.startswith(("b'", 'b"')):
+                    msg = msg[2:-1]
+                info = dict.fromkeys(empty)
+                info["error"] = f"Не удалось прочитать: {msg}"[:300]
+        info["cloud"] = int(cloud)
         if info["ts"] is not None:
             info["ts_source"] = "exif"
         else:
@@ -357,13 +391,16 @@ class Library:
     def _store(self, c: sqlite3.Connection, mid: int, i: dict) -> None:
         c.execute(
             """UPDATE media SET width=?, height=?, ts=?, ts_source=?, make=?, model=?, software=?, lat=?, lon=?,
-               duration=?, phash=?, dhash=?, sharpness=?, category=?, analyzed=1, error=? WHERE id=?""",
+               duration=?, phash=?, dhash=?, sharpness=?, category=?, analyzed=1, error=?, cloud=? WHERE id=?""",
             (i["width"], i["height"], i["ts"], i["ts_source"], i["make"], i["model"], i["software"], i["lat"],
-             i["lon"], i["duration"], i["phash"], i["dhash"], i["sharpness"], i["category"], i["error"], mid))
+             i["lon"], i["duration"], i["phash"], i["dhash"], i["sharpness"], i["category"], i["error"],
+             i.get("cloud", 0), mid))
         if i["error"]:
             self.status["errors"] += 1
         if i.get("thumb"):
             c.execute("INSERT OR REPLACE INTO thumbs(id, data) VALUES(?, ?)", (mid, i["thumb"]))
+        elif i.get("cloud"):
+            c.execute("DELETE FROM thumbs WHERE id=?", (mid,))
 
     # ------------------------------------------------------------ группировка
 
@@ -391,11 +428,13 @@ class Library:
                 extra[r["parent_id"]].append(r)
             out = []
             found = self.finder.found if self.finder is not None else None
+            # Пока идёт сканирование, необработанные файлы не показываем: у них ещё нет ни даты, ни миниатюры
             for r in c.execute(
                     """SELECT id, path, kind, ext, size, mtime, width, height, ts, ts_source, model, lat, lon, duration,
                        sharpness, category, status, series_id, series_best, dup_id, dup_best, dup_exact, error,
-                       match, match_ref, match_strong
-                       FROM media WHERE parent_id IS NULL ORDER BY ts, path"""):
+                       match, match_ref, match_strong, cloud
+                       FROM media WHERE parent_id IS NULL AND (analyzed=1 OR ?) ORDER BY ts, path""",
+                    (not self.scanning,)):
                 kids = extra.get(r["id"], [])
                 cx = []
                 for k in kids:
@@ -412,7 +451,7 @@ class Library:
                     "lat": r["lat"], "lon": r["lon"], "dur": r["duration"], "sh": r["sharpness"],
                     "cam": r["model"], "st": r["status"], "s": r["series_id"], "sb": r["series_best"],
                     "d": r["dup_id"], "db": r["dup_best"], "dx": r["dup_exact"], "cx": cx,
-                    "v": int(r["mtime"] or 0), "err": r["error"],
+                    "v": int(r["mtime"] or 0), "err": r["error"], "cl": r["cloud"],
                     "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"],
                     "ph": (None if not found or r["id"] not in found else
                            (found[r["id"]] or (-1 if r["id"] in self.finder.mismatch else
@@ -543,8 +582,9 @@ class Library:
                 if r["parent_id"] is None and size:
                     fp = {k: r[k] for k in ("path", "kind", "size", "ts", "ts_source", "model", "width", "height",
                                             "duration", "phash", "dhash")}
+                    # не скачанный из облака файл не читаем ради хэша — иначе ждём скачивания
                     fp.update(name=p.name, source=str(self.root), thumb=thumbs.get(r["id"]),
-                              sha1=r["sha1"] or self._sha1(p))
+                              sha1=r["sha1"] or (None if cloud_only(p) else self._sha1(p)))
                 trash.remove(p, self.root)
                 if fp:
                     journal.append(fp)

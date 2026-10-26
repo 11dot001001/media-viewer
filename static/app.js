@@ -116,7 +116,7 @@ const MATCH = {
 let mapDirty = true;
 
 // ============================================================ загрузка
-let pollTimer = null, lastVersion = -1, lastLoad = 0, wasScanning = false;
+let pollTimer = null, lastVersion = -1, lastLoad = 0, loadCost = 0, wasScanning = false;
 
 async function init() {
   bindUI();
@@ -189,7 +189,8 @@ function handleScan(sc) {
       match: sc.message,
     }[sc.phase] || sc.message;
     $('.scan-text', box).textContent = text;
-    if (sc.version !== lastVersion && Date.now() - lastLoad > 4000) { lastVersion = sc.version; loadItems(); }
+    // на больших папках загрузка и перерисовка ленты дорогие — обновляем реже, чтобы не мешать сканированию
+    if (sc.version !== lastVersion && Date.now() - lastLoad > Math.max(4000, loadCost * 8)) { lastVersion = sc.version; loadItems(); }
     clearTimeout(pollTimer);
     pollTimer = setTimeout(async () => { try { handleScan(await api('/api/scan')); } catch { /* сервер перезапускается */ } }, 700);
   } else {
@@ -200,7 +201,12 @@ function handleScan(sc) {
     }
     if (wasScanning) {
       wasScanning = false;
-      if (sc.phase === 'done') toast(sc.errors ? `Сканирование завершено, не прочитано файлов: ${sc.errors}` : 'Сканирование завершено');
+      if (sc.phase === 'done') {
+        const notes = [];
+        if (sc.errors) notes.push(`не прочитано файлов: ${sc.errors}`);
+        if (sc.cloud) notes.push(`не скачаны из облака: ${sc.cloud} — они без миниатюр, после скачивания пересканируйте папку`);
+        toast('Сканирование завершено' + (notes.length ? ', ' + notes.join('; ') : ''), false, sc.cloud ? 10000 : undefined);
+      }
     }
     if (sc.phase === 'error') toast(esc(sc.message), true, 8000);
     if (sc.phase === 'confirm' && !handleScan.asked) {
@@ -229,6 +235,7 @@ async function loadItems() {
   mapDirty = true;
   renderCats();
   render();
+  loadCost = Date.now() - lastLoad;
   if (S.source?.kind === 'folder' && S.find.phase === 'idle') {
     api('/api/phone-find').then(f => {
       if (f.phase === 'idle') return;
@@ -405,6 +412,7 @@ function tileHTML(it, o = {}) {
   if (it.d) b.push(`<span class="bdg dup" title="${it.dx ? 'Есть точная копия' : 'Есть похожий дубликат'}">⧉</span>`);
   for (const c of it.cx || []) b.push(`<span class="bdg cx" title="${c === 'RAW' ? 'Есть RAW-файл с тем же именем' : c === 'LIVE' ? 'Live Photo: есть видео с тем же именем' : 'Связанный файл'}">${c}</span>`);
   if (it.err) b.push(`<span class="bdg err" title="${esc(it.err)}">!</span>`);
+  if (it.cl) b.push('<span class="bdg offline" title="Файл ещё не скачан из облака на компьютер, поэтому не разобран: нет миниатюры, серий и дубликатов. Когда он скачается, пересканируйте папку.">☁↓</span>');
   const dur = it.k === 'v' ? `<span class="bdg vid-dur">▶ ${fmtDur(it.dur)}</span>` : '';
   // в корзине у найденных на телефоне — миниатюра, которую прислал сам iPhone
   const inset = S.view === 'trash' && typeof it.ph === 'string'

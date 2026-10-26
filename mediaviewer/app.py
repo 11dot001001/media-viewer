@@ -259,7 +259,8 @@ def pick_folder():
 
 @app.get("/api/items")
 def items():
-    return lib().list_items()
+    # json.dumps напрямую: стандартная сериализация FastAPI на десятках тысяч записей в разы медленнее
+    return Response(json.dumps(lib().list_items(), ensure_ascii=False), media_type="application/json")
 
 
 @app.get("/api/item/{mid}")
@@ -270,11 +271,15 @@ def item(mid: int):
     return d
 
 
+# Вместо 404 (браузер пишет каждую в консоль): пустая плитка. Не кэшируется — миниатюра может появиться позже.
+NO_THUMB = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
+
+
 @app.get("/api/thumb/{mid}")
 def thumb(mid: int):
     data = lib().thumb(mid)
     if data is None:
-        raise HTTPException(404)
+        return Response(NO_THUMB, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "max-age=31536000, immutable"})
 
 
