@@ -52,6 +52,7 @@ CREATE INDEX IF NOT EXISTS ix_parent ON media(parent_id);
 CREATE INDEX IF NOT EXISTS ix_size ON media(size);
 CREATE TABLE IF NOT EXISTS thumbs(id INTEGER PRIMARY KEY, data BLOB);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS ai(id INTEGER PRIMARY KEY, model TEXT, mtime REAL, emb BLOB, label TEXT, score REAL);
 """
 
 STATUS_NONE, STATUS_KEEP, STATUS_REJECT = 0, 1, 2
@@ -96,6 +97,8 @@ class Library:
         self._thread: threading.Thread | None = None
         self._group_lock = threading.Lock()
         self.finder = None  # PhoneFinder: поиск файлов корзины на телефоне
+        self.analyzer = None  # ai.Analyzer: анализ нейросетью, запускается со страницы «AI»
+        self.ai_version = 0  # растёт при каждой записи в таблицу ai (сбрасывает кэш поиска)
         self._offline: set[str] = set()  # файлы, которые лежат только в облаке (см. CLOUD_ONLY_ATTRS)
         self.status = {"phase": "idle", "total": 0, "done": 0, "message": "", "errors": 0, "started": 0, "version": 0,
                        "folder_size": None, "folder_files": None, "cloud": 0}
@@ -167,6 +170,8 @@ class Library:
 
     def stop(self) -> None:
         self._cancel.set()
+        if self.analyzer is not None:
+            self.analyzer.cancel()
         if self._thread:
             self._thread.join(timeout=10)
 
@@ -430,10 +435,11 @@ class Library:
             found = self.finder.found if self.finder is not None else None
             # Пока идёт сканирование, необработанные файлы не показываем: у них ещё нет ни даты, ни миниатюры
             for r in c.execute(
-                    """SELECT id, path, kind, ext, size, mtime, width, height, ts, ts_source, model, lat, lon, duration,
+                    """SELECT id, path, kind, ext, size, media.mtime AS mtime, width, height, ts, ts_source, media.model AS model, lat, lon, duration,
                        sharpness, category, status, series_id, series_best, dup_id, dup_best, dup_exact, error,
-                       match, match_ref, match_strong, cloud
-                       FROM media WHERE parent_id IS NULL AND (analyzed=1 OR ?) ORDER BY ts, path""",
+                       match, match_ref, match_strong, cloud, ai.label AS ai
+                       FROM media LEFT JOIN ai USING(id)
+                       WHERE parent_id IS NULL AND (analyzed=1 OR ?) ORDER BY ts, path""",
                     (not self.scanning,)):
                 kids = extra.get(r["id"], [])
                 cx = []
@@ -452,7 +458,7 @@ class Library:
                     "cam": r["model"], "st": r["status"], "s": r["series_id"], "sb": r["series_best"],
                     "d": r["dup_id"], "db": r["dup_best"], "dx": r["dup_exact"], "cx": cx,
                     "v": int(r["mtime"] or 0), "err": r["error"], "cl": r["cloud"],
-                    "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"],
+                    "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"], "ai": r["ai"],
                     "ph": (None if not found or r["id"] not in found else
                            (found[r["id"]] or (-1 if r["id"] in self.finder.mismatch else
                                                -2 if r["id"] in self.finder.unreadable else 0))),

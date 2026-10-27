@@ -1,0 +1,5 @@
+# Нейросеть (страница «AI»). Ставится по кнопке из программы, без неё всё остальное работает.
+# DirectML: видеокарта любого производителя на Windows, при её отсутствии — процессор
+onnxruntime-directml>=1.24; sys_platform == 'win32'
+onnxruntime>=1.24; sys_platform != 'win32'
+tokenizers>=0.21

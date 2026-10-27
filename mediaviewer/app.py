@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import matching, media, trash
+from . import ai, matching, media, trash
 from .journal import Journal
 from .library import Library
 from .phone import FolderDevice, PhoneLibrary, WpdDevice
@@ -24,6 +24,8 @@ STATIC = BASE / "static"
 DATA = BASE / "data"
 DATA.mkdir(exist_ok=True)
 RECENT_FILE = DATA / "recent.json"
+
+AI = ai.Manager(DATA)
 
 app = FastAPI(title="Media Viewer")
 app.add_middleware(GZipMiddleware, minimum_size=2048)
@@ -127,6 +129,7 @@ def state():
         "settings": s.__dict__ if s else None,
         "trash_target": _lib.trash_target() if _lib else None,
         "tools": {"ffmpeg": bool(media.FFMPEG), "heif": media.HEIF_OK, "raw": media.rawpy is not None},
+        "ai": {"ready": AI.ready(), "labels": AI.info()["labels"]},
     }
 
 
@@ -337,3 +340,72 @@ def open_external(mid: int):
     if p:
         trash.open_external(p)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- нейросеть (страница «AI»)
+
+def _ai_state() -> dict:
+    res = AI.info()
+    if _lib is not None:
+        an = _lib.analyzer
+        res["analysis"] = dict(an.status if an else {"phase": "idle"}, running=bool(an and an.running), **ai.counts(_lib))
+    return res
+
+
+@app.get("/api/ai")
+def ai_state():
+    return _ai_state()
+
+
+@app.post("/api/ai/install")
+def ai_install():
+    AI.install()
+    return _ai_state()
+
+
+@app.post("/api/ai/remove")
+def ai_remove():
+    lb = _lib
+    if lb is not None and lb.analyzer is not None and lb.analyzer.running:
+        raise HTTPException(409, "Сначала остановите анализ")
+    try:
+        AI.remove()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+    return _ai_state()
+
+
+@app.post("/api/ai/analyze")
+def ai_analyze():
+    lb = lib()
+    if not AI.ready():
+        raise HTTPException(409, "Сначала скачайте модель")
+    if lb.scanning:
+        raise HTTPException(409, "Дождитесь окончания сканирования папки")
+    if lb.analyzer is None:
+        lb.analyzer = ai.Analyzer(lb, AI)
+    lb.analyzer.start()
+    return _ai_state()
+
+
+@app.post("/api/ai/stop")
+def ai_stop():
+    lb = lib()
+    if lb.analyzer is not None:
+        lb.analyzer.cancel()
+    return _ai_state()
+
+
+class SearchReq(BaseModel):
+    q: str
+
+
+@app.post("/api/ai/search")
+def ai_search(req: SearchReq):
+    q = req.q.strip()
+    if not q:
+        return {"hits": []}
+    try:
+        return {"hits": ai.search(lib(), AI, q)}
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e

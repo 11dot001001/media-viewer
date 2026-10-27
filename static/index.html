@@ -36,6 +36,8 @@
   <symbol id="i-skip" viewBox="0 0 24 24"><path d="m5 4 10 8-10 8z"/><path d="M19 5v14"/></symbol>
   <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.14 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   <symbol id="i-keyboard" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/><path d="M7 16h10"/></symbol>
 </svg>
 
@@ -71,6 +73,7 @@
       <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
       <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
       <button data-view="trash"><svg class="i"><use href="#i-trash"/></svg>Корзина отбора<span class="cnt" id="cnt-trash"></span></button>
+      <button data-view="ai"><svg class="i"><use href="#i-sparkles"/></svg>AI<span class="cnt" id="cnt-ai"></span></button>
     </nav>
 
     <section id="matchSec" class="hidden">
@@ -78,6 +81,15 @@
       <div id="matchList" class="cats"></div>
       <button class="btn small wide" id="btnMarkCloud" style="margin-top:8px" title="Эти снимки уже сохранены в облаке — на телефоне они не нужны">«Есть в облаке» → к удалению</button>
       <button class="btn small wide ghost" id="btnRefs" style="margin-top:6px">Папки облака…</button>
+    </section>
+
+    <section id="aiSec" class="hidden">
+      <h4><svg class="i"><use href="#i-sparkles"/></svg>По смыслу <button id="aiReset" class="link hidden">сбросить</button></h4>
+      <form id="aiSearch" class="ai-search" autocomplete="off">
+        <svg class="i"><use href="#i-search"/></svg>
+        <input id="aiQuery" type="search" placeholder="Найти: море, кот, чек…" title="Поиск по описанию того, что на снимке. Enter — искать, Esc — сбросить">
+      </form>
+      <div id="aiCats" class="cats"></div>
     </section>
 
     <section>
@@ -181,6 +193,7 @@
       </div>
     </div>
     <div id="view-trash" class="view hidden"></div>
+    <div id="view-ai" class="view hidden"></div>
   </main>
 </div>
 

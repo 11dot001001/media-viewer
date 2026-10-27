@@ -12,6 +12,9 @@ const CATS = {
   messenger: { label: 'Из мессенджеров', color: '#3fb871' },
   other: { label: 'Прочее', color: '#8b929b' },
 };
+// Цвета смысловых категорий (страница «AI»): по порядку из /api/state, «не определено» — серое
+const AI_COLORS = ['#f59e8b', '#e0a458', '#f472b6', '#4ade80', '#60a5fa', '#94a3b8', '#facc15', '#22d3ee', '#c084fc', '#a8a29e'];
+const AI_OTHER = { key: 'other', label: 'Не определено', color: '#6b7280' };
 const PHONE_ICON = '<svg class="i"><use href="#i-phone"/></svg>';
 const TS_SOURCE = { exif: 'из EXIF', name: 'из имени файла', mtime: 'дата изменения файла' };
 const PLAYABLE = new Set(['.mp4', '.m4v', '.webm', '.mov']);
@@ -108,6 +111,10 @@ const S = {
   source: null, match: null, journal: 0,
   find: { phase: 'idle' },
   phoneFilter: 'all',  // корзина: all | found | missing
+  ai: { ready: false, labels: [] },  // нейросеть: установлена ли модель, список смысловых категорий
+  aiInfo: null,  // состояние страницы «AI» (/api/ai)
+  aiSel: new Set(),  // выбранные смысловые категории (пусто — без фильтра)
+  search: null,  // { q, rank: Map(id → место в выдаче) } — поиск по описанию
 };
 const MATCH = {
   deleted: { label: 'Удалены в облаке', color: '#ef5350', hint: 'Вы уже удалили их из облака — сразу помечены к удалению' },
@@ -135,6 +142,7 @@ function applyState(st) {
   if (S.source?.kind !== 'phone') S.match = null;
   S.settings = st.settings;
   S.trashTarget = st.trash_target || 'recycle';
+  if (st.ai) S.ai = st.ai;
   // в панели — только имя папки, полный путь во всплывающей подсказке
   $('#rootPath').textContent = S.root ? S.root.split(/[\\/]/).filter(Boolean).pop() : '';
   $('#matchSec').classList.toggle('hidden', S.source?.kind !== 'phone');
@@ -249,6 +257,8 @@ async function loadItems() {
 // ============================================================ фильтры
 function passFilters(it, useStatus = true) {
   if (!S.cats.has(it.c)) return false;
+  if (S.aiSel.size && !S.aiSel.has(it.ai)) return false;
+  if (S.search && !S.search.rank.has(it.id)) return false;
   if (S.match && (it.m || 'new') !== S.match) return false;
   if (useStatus && S.status !== 'all' && it.st !== +S.status) return false;
   if (S.from || S.to) {
@@ -277,6 +287,7 @@ const granularity = () => (S.cols <= 7 ? 'day' : S.cols <= 15 ? 'month' : 'year'
 const fmtMonthF = new Intl.DateTimeFormat('ru-RU', { timeZone: 'UTC', month: 'long', year: 'numeric' });
 
 function groupKey(it) {
+  if (S.search && S.view === 'grid') return 'q';
   if (S.sort === 'size') return 'sz' + SIZE_BUCKETS.findIndex(([min]) => (it.sz || 0) >= min);
   const d = dayKey(it.t);
   if (d === 'none') return d;
@@ -284,12 +295,13 @@ function groupKey(it) {
   return g === 'day' ? d : g === 'month' ? 'm' + d.slice(0, 7) : 'y' + d.slice(0, 4);
 }
 function groupTitle(k) {
+  if (k === 'q') return `По запросу «${esc(S.search.q)}»`;
   if (k.startsWith('sz')) return SIZE_BUCKETS[+k.slice(2)][1];
   if (k.startsWith('m')) return fmtMonthF.format(new Date(k.slice(1) + '-01T00:00:00Z')).replace(/\s*г\.$/, '');
   if (k.startsWith('y')) return k.slice(1);
   return fmtDay(k);
 }
-const groupSelectLabel = k => (k.startsWith('sz') ? 'выбрать все' : k.startsWith('m') ? 'выбрать месяц'
+const groupSelectLabel = k => (k.startsWith('sz') || k === 'q' ? 'выбрать все' : k.startsWith('m') ? 'выбрать месяц'
   : k.startsWith('y') ? 'выбрать год' : 'выбрать день');
 
 function seriesRep(sid) {
@@ -360,8 +372,25 @@ function renderMatch() {
   $('#btnMarkCloud').textContent = pending ? `«Есть в облаке» → к удалению (${pending})` : '«Есть в облаке» → к удалению';
 }
 
+function aiLabels() {
+  return [...S.ai.labels.map((l, i) => ({ ...l, color: AI_COLORS[i % AI_COLORS.length] })), AI_OTHER];
+}
+
+function renderAiSide() {
+  const counts = {};
+  for (const it of S.items) if (it.ai) counts[it.ai] = (counts[it.ai] || 0) + 1;
+  const any = Object.keys(counts).length > 0;
+  $('#aiSec').classList.toggle('hidden', !any);
+  $('#aiReset').classList.toggle('hidden', !S.aiSel.size && !S.search);
+  if (!any) return;
+  $('#aiCats').innerHTML = aiLabels().filter(l => counts[l.key]).map(l =>
+    `<div class="cat ${S.aiSel.has(l.key) ? 'active' : ''}" data-ai="${l.key}" title="Клик — показать только их (можно выбрать несколько)">
+       <span class="dot" style="background:${l.color}"></span>${l.label}<span class="cnt">${counts[l.key]}</span></div>`).join('');
+}
+
 function renderCats() {
   renderMatch();
+  renderAiSide();
   const counts = {};
   for (const it of S.items) counts[it.c] = (counts[it.c] || 0) + 1;
   $('#cats').innerHTML = Object.entries(CATS).map(([k, c]) =>
@@ -383,7 +412,9 @@ function render() {
   updateCounts();
   $$('#views button').forEach(b => b.classList.toggle('active', b.dataset.view === S.view));
   $$('.view').forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + S.view));
-  if (!S.root) return;
+  // страница «AI» открывается и без папки: модель можно скачать заранее
+  if (S.view === 'ai') { if (!S.root) showWelcome(false); renderAI(); return; }
+  if (!S.root) { showWelcome(true); return; }
   ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash })[S.view]();
 }
 
@@ -543,7 +574,9 @@ function emptyHTML(title, text) {
 }
 
 function gridList() {
-  let list = sortList(S.items.filter(it => passFilters(it)));
+  let list = S.items.filter(it => passFilters(it));
+  // при поиске — от самых подходящих к менее подходящим
+  list = S.search ? list.sort((a, b) => S.search.rank.get(a.id) - S.search.rank.get(b.id)) : sortList(list);
   if (S.collapse) {
     const seen = new Set();
     const out = [];
@@ -1362,6 +1395,13 @@ async function onAction(act, el) {
     case 'fold': setFolded([el.dataset.key], !S.folded.has(el.dataset.key)); break;
     case 'fold-all': setView('grid'); setFolded(new Set(gridList().map(groupKey)), true); break;
     case 'unfold-all': setView('grid'); setFolded([...S.folded], false); break;
+    case 'ai-install': aiCall('/api/ai/install'); break;
+    case 'ai-remove':
+      if (await confirmModal('Удалить модель?', `<p>С диска будут удалены файлы модели (${fmtSize(S.aiInfo?.size)}). Результаты уже проведённого анализа останутся.</p><p class="muted">Скачать модель снова можно на этой же странице.</p>`, 'Удалить', true)) aiCall('/api/ai/remove');
+      break;
+    case 'ai-analyze': aiCall('/api/ai/analyze'); break;
+    case 'ai-stop': aiCall('/api/ai/stop'); break;
+    case 'ai-cat': S.aiSel = new Set([el.dataset.key]); S.search = null; $('#aiQuery').value = ''; S.view = 'grid'; filtersChanged(); break;
     case 'ph-filter': S.phoneFilter = el.dataset.v; S.selected.clear(); S.focus = null; render(); break;
     default: break;
   }
@@ -1604,6 +1644,7 @@ async function pollFind() {
 
 function resetForNewSource() {
   S.find = { phase: 'idle' };
+  S.search = null; S.aiSel.clear(); S.aiInfo = null; $('#aiQuery').value = '';
   S.phoneFilter = 'all';
   S.items = []; S.byId = new Map(); S.series = new Map(); S.dups = new Map();
   S.selected.clear(); S.undo = []; S.focus = null; S.folder = { size: null, files: null }; S.match = null;
@@ -1625,11 +1666,129 @@ async function openFolder(path) {
     S.items = []; S.byId = new Map(); S.series = new Map(); S.dups = new Map();
     S.selected.clear(); S.undo = []; S.focus = null; S.folder = { size: null, files: null }; S.match = null;
     S.find = { phase: 'idle' };
+    S.search = null; S.aiSel.clear(); S.aiInfo = null; $('#aiQuery').value = '';
     lastVersion = -1;
     mapDirty = true;
     applyState(st);
     setView('grid');
   } catch (e) { toast(esc(e.message), true); }
+}
+
+// ============================================================ нейросеть (страница «AI»)
+let aiTimer = null;
+
+async function aiCall(url) {
+  try { S.aiInfo = await api(url, {}); } catch (e) { toast(esc(e.message), true); }
+  aiPoll();
+}
+
+/** Опрос /api/ai, пока открыта страница или идёт установка/анализ. По окончании анализа список перечитывается. */
+async function aiPoll() {
+  clearTimeout(aiTimer);
+  aiTimer = null;
+  const wasRunning = S.aiInfo?.analysis?.running;
+  let info;
+  try { info = await api('/api/ai'); } catch { return; }
+  const changed = JSON.stringify(info) !== JSON.stringify(S.aiInfo);
+  S.aiInfo = info;
+  S.ai.ready = info.packages && info.installed;
+  const a = info.analysis;
+  const running = info.busy || a?.running;
+  if (wasRunning && !a?.running) {
+    loadItems();
+    if (a?.phase === 'done') toast('Анализ завершён: категории по смыслу и поиск — в панели слева');
+    if (a?.phase === 'error') toast(esc(a.message), true, 8000);
+  } else if (a?.running && Date.now() - lastLoad > 8000) loadItems();
+  if (info.job?.phase === 'error' && aiPoll.shownErr !== info.job.message) {
+    aiPoll.shownErr = info.job.message;
+    toast(esc(info.job.message), true, 10000);
+  }
+  if (S.view === 'ai' && changed) renderAI();  // без изменений не перерисовываем: иначе сбивается наведение на кнопки
+  $('#cnt-ai').textContent = a?.running && a.total ? Math.floor(a.done / a.total * 100) + ' %' : info.busy ? '…' : '';
+  if (running || S.view === 'ai') aiTimer = setTimeout(aiPoll, running ? 800 : 3000);
+}
+
+async function aiSearch(q) {
+  q = q.trim();
+  if (!q) { S.search = null; filtersChanged(); return; }
+  try {
+    const r = await api('/api/ai/search', { q });
+    S.search = { q, rank: new Map(r.hits.map(([id], i) => [id, i])) };
+    if (!r.hits.length) toast('Ничего похожего не нашлось');
+  } catch (e) { toast(esc(e.message), true); return; }
+  S.view = 'grid';
+  filtersChanged();
+  $('#view-grid').scrollTop = 0;
+}
+
+function aiBar(done, total, indet) {
+  return `<div class="bar ai-bar${indet ? ' indet' : ''}"><i style="width:${indet ? '' : (total ? done / total * 100 : 0).toFixed(1) + '%'}"></i></div>`;
+}
+
+function renderAI() {
+  const el = $('#view-ai');
+  const info = S.aiInfo;
+  if (!info) { el.innerHTML = '<div class="list-head"><h2>AI</h2></div>'; if (!aiTimer) aiPoll(); return; }
+  if (!aiTimer) aiTimer = setTimeout(aiPoll, 3000);
+  const ready = info.packages && info.installed;
+  const job = info.job || {};
+  const installing = info.busy;
+  const a = info.analysis;
+
+  // 1. Модель
+  let model;
+  if (installing) {
+    const det = job.phase === 'download' && job.total;
+    model = `<p>${esc(job.message)}${det ? ` <span class="mono">${fmtSize(job.done)} из ${fmtSize(job.total)}</span>` : ''}</p>${aiBar(job.done, job.total, !det)}
+      <p class="muted">Установка идёт в фоне, разбор можно продолжать. Если скачивание прервётся, оно продолжится с того же места.</p>`;
+  } else if (ready) {
+    model = `<p>Модель скачана${info.size ? ` (${fmtSize(info.size)})` : ''}.${info.device ? ` Считает: <b>${esc(info.device)}</b>.` : ''}</p>
+      <div class="ai-acts"><button class="btn small ghost" data-act="ai-remove">Удалить модель</button></div>`;
+  } else {
+    model = `<p>Скачивается один раз: модель (≈ ${fmtSize(info.download_size)}) и ONNX Runtime для расчётов на видеокарте.${job.phase === 'error' ? `<br><span class="err-text">${esc(job.message)}</span>` : ''}</p>
+      <div class="ai-acts"><button class="btn primary" data-act="ai-install"><svg class="i"><use href="#i-sparkles"/></svg>${job.phase === 'error' ? 'Повторить' : 'Скачать модель'}</button></div>`;
+  }
+  const pill = installing ? '<span class="pill">Установка…</span>' : ready ? '<span class="pill ok">Установлена</span>' : '<span class="pill">Не установлена</span>';
+
+  // 2. Анализ папки
+  let analysis;
+  if (!S.root || !a) {
+    analysis = '<p class="muted">Откройте папку, чтобы проанализировать её снимки.</p>';
+  } else {
+    const left = Math.max(0, a.total - a.done);
+    const rate = a.running && a.done > 0 && a.started ? a.done / (Date.now() / 1000 - a.started) : 0;
+    const eta = rate && a.total > a.done ? ` · осталось ≈ ${fmtDur((a.total - a.done) / rate) || '0:01'}` : '';
+    const head = a.running
+      ? (a.phase === 'load' ? 'Загрузка модели…' : `${esc(a.message)} · ${a.done} из ${a.total}${eta}`)
+      : !left && a.total ? `Все снимки проанализированы: <b>${a.total}</b>`
+        : `Проанализировано <b>${a.done}</b> из ${a.total}${left && a.done ? ` · новых: ${left}` : ''}`;
+    const btn = a.running
+      ? '<button class="btn" data-act="ai-stop">Остановить</button>'
+      : !left && a.total ? ''
+        : `<button class="btn primary" data-act="ai-analyze" ${ready && !installing ? '' : 'disabled'}><svg class="i"><use href="#i-sparkles"/></svg>${a.done ? `Проанализировать новые (${left})` : 'Запустить анализ'}</button>`;
+    analysis = `<p>${head}</p>${aiBar(a.done, a.total, a.running && a.phase === 'load')}
+      ${btn ? `<div class="ai-acts">${btn}</div>` : ''}
+      ${!ready ? '<p class="muted">Сначала скачайте модель.</p>' : ''}
+      ${a.phase === 'error' ? `<p class="err-text">${esc(a.message)}</p>` : ''}`;
+  }
+
+  // 3. Категории по смыслу
+  const counts = a?.labels || {};
+  const cats = aiLabels().filter(l => counts[l.key]).map(l =>
+    `<button class="ai-chip" data-act="ai-cat" data-key="${l.key}"><span class="dot" style="background:${l.color}"></span>${l.label}<span class="cnt">${counts[l.key]}</span></button>`).join('');
+
+  el.innerHTML = `<div class="list-head"><h2>AI</h2><span class="sub">Нейросеть работает на этом компьютере: снимки никуда не отправляются</span></div>
+    <div class="ai-grid">
+      <div class="card ai-card"><div class="card-head"><span class="t">Модель SigLIP 2</span>${pill}</div>
+        <p class="muted">Понимает, что на снимке: раскладывает снимки по категориям и ищет по описанию на русском и английском.</p>${model}</div>
+      <div class="card ai-card"><div class="card-head"><span class="t">Анализ папки</span>${S.root ? `<span class="sub" title="${esc(S.root)}">${esc(S.root.split(/[\\/]/).filter(Boolean).pop())}</span>` : ''}</div>
+        <p class="muted">Модель смотрит на миниатюры из индекса, сами файлы не читаются. Снимки, добавленные позже, анализируются этой же кнопкой.</p>${analysis}</div>
+      <div class="card ai-card wide"><div class="card-head"><span class="t">Категории по смыслу</span></div>
+        ${cats ? `<div class="ai-chips">${cats}</div><p class="muted">Клик — показать в ленте. Поиск по описанию — в панели слева, раздел «По смыслу».</p>`
+          : '<p class="muted">Появятся после анализа: люди, животные, еда, природа, город, транспорт, документы и чеки, экраны, мемы, случайные кадры.</p>'}</div>
+      <div class="card ai-card soon"><div class="card-head"><span class="t">Оценка качества кадра</span><span class="pill">Скоро</span></div>
+        <p class="muted">Закрытые глаза, смаз, неудачная композиция: подсказка, какой кадр серии оставить.</p></div>
+    </div>`;
 }
 
 // ============================================================ привязка интерфейса
@@ -1684,6 +1843,16 @@ function bindUI() {
     S.cats = new Set([c.dataset.cat]);
     filtersChanged();
   });
+  $('#aiCats').addEventListener('click', e => {
+    const c = e.target.closest('[data-ai]'); if (!c) return;
+    const k = c.dataset.ai;
+    if (S.aiSel.has(k)) S.aiSel.delete(k); else S.aiSel.add(k);
+    if (!['grid', 'map'].includes(S.view)) S.view = 'grid';
+    filtersChanged();
+  });
+  $('#aiSearch').addEventListener('submit', e => { e.preventDefault(); aiSearch($('#aiQuery').value); });
+  $('#aiQuery').addEventListener('keydown', e => { if (e.key === 'Escape') { $('#aiQuery').value = ''; aiSearch(''); } });
+  $('#aiReset').onclick = () => { S.aiSel.clear(); $('#aiQuery').value = ''; aiSearch(''); };
   $('#statusFilter').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     S.status = b.dataset.v;
@@ -1829,6 +1998,7 @@ function bindUI() {
     if (!$('#viewer').classList.contains('hidden')) { viewerKey(e); return; }
     if (!$('#review').classList.contains('hidden')) { reviewKey(e); return; }
     if (!$('#welcome').classList.contains('hidden')) { if (e.key === 'Escape' && S.root) showWelcome(false); return; }
+    if (S.view === 'ai') return;
     gridKey(e);
   });
 }

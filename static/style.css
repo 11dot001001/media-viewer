@@ -653,3 +653,33 @@ body.tiles-tiny #view-trash .ph-inset i { display: none; }
 .stats-h { margin: 18px 0 6px; font-size: 13px; }
 .stats-hist { max-height: 220px; overflow-y: auto; }
 .modal-card:has(.stats-table) { width: min(640px, 94vw); }
+
+/* ---------- AI: поиск и категории по смыслу в панели, страница «AI» */
+.ai-search {
+  display: flex; align-items: center; gap: 7px; margin: 0 0 8px; padding: 0 10px; height: 32px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; transition: border-color .15s;
+}
+.ai-search:focus-within { border-color: rgba(124, 135, 255, .55); }
+.ai-search svg.i { width: 14px; height: 14px; color: var(--muted); }
+.ai-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; }
+.ai-search input::placeholder { color: var(--muted); }
+.ai-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; max-width: 1100px; }
+.ai-grid .card { margin: 0; }
+.ai-card.wide { grid-column: 1 / -1; }
+.ai-card p { margin: 0 0 10px; line-height: 1.55; color: var(--text-2); }
+.ai-card p.muted { color: var(--muted); }
+.ai-card .card-head .sub { margin-left: auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-card .card-head .pill { margin-left: auto; }
+.ai-card.soon { opacity: .6; }
+.ai-acts { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; }
+.ai-bar { margin: 2px 0 12px; height: 5px; }
+.ai-bar.indet i { width: 30%; animation: indet 1.2s infinite ease-in-out; }
+.ai-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.ai-chip {
+  display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; border-radius: 20px; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--text-2); transition: background .15s, color .15s;
+}
+.ai-chip:hover { background: var(--surface-3); color: var(--text); }
+.ai-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+.ai-chip .cnt { margin-left: 2px; }
+.err-text { color: var(--reject); }
