@@ -1,7 +1,7 @@
-"""Нейросеть SigLIP 2: категории по смыслу и поиск по тексту.
+"""Нейросети страницы «AI»: SigLIP 2 (категории по смыслу и поиск по тексту) и модели лиц (оценка кадра).
 
-Пакеты и модель ставятся по кнопке со страницы «AI» (не всем они нужны), анализ папки тоже запускается вручную.
-Всё считается на этом компьютере: модель видит только миниатюры из индекса, сами файлы не читаются.
+Пакеты и модели ставятся по кнопке со страницы «AI» (не всем они нужны), анализ папки тоже запускается вручную.
+Всё считается на этом компьютере. SigLIP видит только миниатюры из индекса.
 """
 from __future__ import annotations
 
@@ -27,6 +27,13 @@ REPO = "https://huggingface.co/onnx-community/siglip2-base-patch16-224-ONNX/reso
 # Текстовая модель fp16, а не квантованная int8: та заметно хуже понимает запросы на русском
 FILES = ("tokenizer.json", "onnx/text_model_fp16.onnx", "onnx/vision_model.onnx")
 MODEL_SIZE = 925 * 1024 ** 2  # примерно, для кнопки «Скачать»
+# Модели лиц для оценки кадра: поиск лиц YuNet (MIT) и точки лица MediaPipe Face Mesh (Apache 2.0)
+FACES = "faces"
+FACES_FILES = {
+    "yunet.onnx": "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
+    "face_landmarks.onnx": "https://huggingface.co/naklitechie/face-landmarks-onnx/resolve/main/face_landmarks.onnx",
+}
+FACES_SIZE = 5 * 1024 ** 2
 REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements-ai.txt"
 
 # Обученные параметры google/siglip2-base-patch16-224: вероятность совпадения = sigmoid(scale · cos + bias)
@@ -61,6 +68,10 @@ LABELS = [
 ]
 OTHER = "other"  # не подходит уверенно ни под одну категорию
 
+# Красота кадра, как в CLIP-IQA: насколько снимок ближе к «хорошему фото», чем к «плохому» (0..1).
+# На снимках из поездки выше всех Фудзи, бамбуковая роща и тории, ниже всех — вывески, билеты, пол.
+AES_PROMPTS = ("a beautiful high quality photo", "a bad low quality photo")
+
 
 def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
@@ -69,10 +80,18 @@ def _sigmoid(x):
 # ---------------------------------------------------------------- установка
 
 class Manager:
-    """Установка пакетов, скачивание модели и сама модель (загружается в память при первом обращении)."""
+    """Установка пакетов, скачивание одной модели и сама модель (загружается в память при первом обращении).
 
-    def __init__(self, data_dir: Path):
-        self.dir = data_dir / "ai" / MODEL
+    files: путь внутри папки модели → откуда скачать; factory: папка модели → готовый к работе объект.
+    """
+
+    def __init__(self, data_dir: Path, name: str = MODEL, files: dict[str, str] | None = None,
+                 size: int = MODEL_SIZE, factory=None):
+        self.name = name
+        self.dir = data_dir / "ai" / name
+        self.files = files or {f: REPO + f for f in FILES}
+        self.size = size
+        self.factory = factory or Engine
         self.job = {"phase": "idle", "done": 0, "total": 0, "message": ""}
         self._thread: threading.Thread | None = None
         self._engine: Engine | None = None
@@ -83,7 +102,7 @@ class Manager:
         return all(importlib.util.find_spec(m) is not None for m in ("onnxruntime", "tokenizers"))
 
     def model_ok(self) -> bool:
-        return all((self.dir / f).is_file() for f in FILES)
+        return all((self.dir / f).is_file() for f in self.files)
 
     def ready(self) -> bool:
         return self.packages_ok() and self.model_ok()
@@ -93,11 +112,9 @@ class Manager:
 
     def info(self) -> dict:
         size = sum(p.stat().st_size for p in self.dir.rglob("*") if p.is_file()) if self.dir.exists() else 0
-        res = {"model": MODEL, "packages": self.packages_ok(), "installed": self.model_ok(), "size": size,
-               "download_size": MODEL_SIZE, "job": dict(self.job), "busy": self.busy(),
-               "device": self._engine.device if self._engine else None,
-               "labels": [{"key": k, "label": lbl} for k, lbl, _, _ in LABELS]}
-        return res
+        return {"model": self.name, "packages": self.packages_ok(), "installed": self.model_ok(), "size": size,
+                "download_size": self.size, "job": dict(self.job), "busy": self.busy(),
+                "device": getattr(self._engine, "device", None)}
 
     def install(self) -> None:
         if self.busy():
@@ -123,10 +140,10 @@ class Manager:
             self.job = {"phase": "error", "done": 0, "total": 0, "message": str(e)[:400]}
 
     def _download(self) -> None:
-        todo = [f for f in FILES if not (self.dir / f).is_file()]
+        todo = [f for f in self.files if not (self.dir / f).is_file()]
         sizes = {}
         for f in todo:
-            with urllib.request.urlopen(urllib.request.Request(REPO + f, method="HEAD"), timeout=60) as r:
+            with urllib.request.urlopen(urllib.request.Request(self.files[f], method="HEAD"), timeout=60) as r:
                 sizes[f] = int(r.headers.get("Content-Length") or 0)
         total = sum(sizes.values())
         done = 0
@@ -136,7 +153,7 @@ class Manager:
             dst.parent.mkdir(parents=True, exist_ok=True)
             part = dst.with_name(dst.name + ".part")
             have = part.stat().st_size if part.exists() else 0
-            req = urllib.request.Request(REPO + f, headers={"Range": f"bytes={have}-"} if have else {})
+            req = urllib.request.Request(self.files[f], headers={"Range": f"bytes={have}-"} if have else {})
             with urllib.request.urlopen(req, timeout=60) as r:
                 if have and r.status != 206:
                     have = 0  # сервер не умеет докачку — начинаем заново
@@ -159,13 +176,20 @@ class Manager:
         shutil.rmtree(self.dir, ignore_errors=True)
         self.job = {"phase": "idle", "done": 0, "total": 0, "message": ""}
 
-    def engine(self) -> Engine:
+    def engine(self):
         with self._lock:
             if self._engine is None:
                 if not self.ready():
                     raise RuntimeError("Модель не установлена — скачайте её на странице «AI»")
-                self._engine = Engine(self.dir)
+                self._engine = self.factory(self.dir)
             return self._engine
+
+
+def faces_manager(data_dir: Path) -> Manager:
+    from .faces import FaceModel
+
+    return Manager(data_dir, FACES, FACES_FILES, FACES_SIZE,
+                   lambda d: FaceModel(d / "yunet.onnx", d / "face_landmarks.onnx"))
 
 
 # ---------------------------------------------------------------- модель
@@ -205,6 +229,7 @@ class Engine:
         self._vout = self._pooled_output(self.vision)
         self._tout = self._pooled_output(self.text)
         self._labels: np.ndarray | None = None
+        self._aes: np.ndarray | None = None
         self._run_lock = threading.Lock()
 
     @staticmethod
@@ -265,6 +290,13 @@ class Engine:
         return res
 
 
+    def aesthetic(self, emb: np.ndarray) -> np.ndarray:
+        if self._aes is None:
+            self._aes = self.embed_texts(list(AES_PROMPTS))
+        s = 100.0 * (emb @ self._aes.T)
+        return 1.0 / (1.0 + np.exp(s[:, 1] - s[:, 0]))
+
+
 # ---------------------------------------------------------------- анализ папки
 
 class Analyzer:
@@ -301,13 +333,20 @@ class Analyzer:
             return
         self.status.update(phase="stopped" if self._cancel.is_set() else "done",
                            message="Остановлено" if self._cancel.is_set() else "Готово")
-        self.lib.status["version"] += 1
+        self.lib.regroup()  # красота кадра участвует в выборе ★ в сериях
 
     def _run(self) -> None:
         eng = self.manager.engine()
         eng.label_matrix()
         with self.lib.connect() as c:
             c.execute("DELETE FROM ai WHERE id NOT IN (SELECT id FROM media WHERE parent_id IS NULL)")
+            # Снимки, проанализированные до появления оценки красоты: досчитываем по сохранённым эмбеддингам
+            old = c.execute("SELECT id, emb FROM ai WHERE model = ? AND aes IS NULL", (MODEL,)).fetchall()
+            for i in range(0, len(old), 1024):
+                part = old[i:i + 1024]
+                mat = np.frombuffer(b"".join(r[1] for r in part), dtype=np.float16).reshape(len(part), -1)
+                aes = eng.aesthetic(mat.astype(np.float32))
+                c.executemany("UPDATE ai SET aes = ? WHERE id = ?", [(float(a), r[0]) for a, r in zip(aes, part)])
             todo = [r[0] for r in c.execute(
                 """SELECT m.id FROM media m JOIN thumbs t ON t.id = m.id LEFT JOIN ai a ON a.id = m.id
                    WHERE m.parent_id IS NULL AND (a.id IS NULL OR a.model != ? OR a.mtime IS NOT m.mtime)
@@ -328,10 +367,11 @@ class Analyzer:
                     if ok:
                         emb = eng.embed_images(np.stack([p for _, p in ok]))
                         labels = eng.classify(emb)
+                        aes = eng.aesthetic(emb)
                         c.executemany(
-                            "INSERT OR REPLACE INTO ai(id, model, mtime, emb, label, score) VALUES(?, ?, ?, ?, ?, ?)",
-                            [(r[0], MODEL, r[2], e.astype(np.float16).tobytes(), lbl, sc)
-                             for (r, _), e, (lbl, sc) in zip(ok, emb, labels)])
+                            "INSERT OR REPLACE INTO ai(id, model, mtime, emb, label, score, aes) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                            [(r[0], MODEL, r[2], e.astype(np.float16).tobytes(), lbl, sc, float(a))
+                             for (r, _), e, (lbl, sc), a in zip(ok, emb, labels, aes)])
                         c.commit()
                     self.status["done"] = min(len(todo), i + len(ids))
                     self.lib.ai_version += 1
@@ -353,10 +393,11 @@ def _safe_pre(data: bytes) -> np.ndarray | None:
 def counts(lib) -> dict:
     with lib.connect() as c:
         total = c.execute("SELECT COUNT(*) FROM media m JOIN thumbs t ON t.id = m.id WHERE m.parent_id IS NULL").fetchone()[0]
-        done = c.execute("""SELECT COUNT(*) FROM ai a JOIN media m ON m.id = a.id
-                            WHERE a.model = ? AND a.mtime IS m.mtime""", (MODEL,)).fetchone()[0]
+        done, no_aes = c.execute("""SELECT COUNT(*), SUM(a.aes IS NULL) FROM ai a JOIN media m ON m.id = a.id
+                                     WHERE a.model = ? AND a.mtime IS m.mtime""", (MODEL,)).fetchone()
         labels = dict(c.execute("SELECT label, COUNT(*) FROM ai WHERE model = ? GROUP BY label", (MODEL,)).fetchall())
-    return {"total": total, "done": done, "labels": labels}
+    # no_aes: проанализированы до появления оценки красоты — её досчитает следующий запуск анализа
+    return {"total": total, "done": done, "no_aes": no_aes or 0, "labels": labels}
 
 
 def _matrix(lib) -> tuple[np.ndarray, np.ndarray]:

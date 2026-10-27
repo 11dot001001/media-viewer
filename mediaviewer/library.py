@@ -52,7 +52,9 @@ CREATE INDEX IF NOT EXISTS ix_parent ON media(parent_id);
 CREATE INDEX IF NOT EXISTS ix_size ON media(size);
 CREATE TABLE IF NOT EXISTS thumbs(id INTEGER PRIMARY KEY, data BLOB);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS ai(id INTEGER PRIMARY KEY, model TEXT, mtime REAL, emb BLOB, label TEXT, score REAL);
+CREATE TABLE IF NOT EXISTS ai(id INTEGER PRIMARY KEY, model TEXT, mtime REAL, emb BLOB, label TEXT, score REAL, aes REAL);
+CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY, version INTEGER, mtime REAL, faces INTEGER, closed INTEGER,
+  eyes REAL, face_sharp REAL);
 """
 
 STATUS_NONE, STATUS_KEEP, STATUS_REJECT = 0, 1, 2
@@ -98,6 +100,7 @@ class Library:
         self._group_lock = threading.Lock()
         self.finder = None  # PhoneFinder: поиск файлов корзины на телефоне
         self.analyzer = None  # ai.Analyzer: анализ нейросетью, запускается со страницы «AI»
+        self.rater = None  # quality.Rater: оценка кадров (глаза, резкость лиц), запускается со страницы «AI»
         self.ai_version = 0  # растёт при каждой записи в таблицу ai (сбрасывает кэш поиска)
         self._offline: set[str] = set()  # файлы, которые лежат только в облаке (см. CLOUD_ONLY_ATTRS)
         self.status = {"phase": "idle", "total": 0, "done": 0, "message": "", "errors": 0, "started": 0, "version": 0,
@@ -109,6 +112,8 @@ class Library:
                              ("cloud", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in cols:  # индекс от прошлой версии
                     c.execute(f"ALTER TABLE media ADD COLUMN {col} {typ}")
+            if "aes" not in {r["name"] for r in c.execute("PRAGMA table_info(ai)")}:
+                c.execute("ALTER TABLE ai ADD COLUMN aes REAL")
             for row in c.execute("SELECT key, value FROM settings WHERE key IN ('folder_size', 'folder_files')"):
                 self.status[row["key"]] = int(row["value"])
 
@@ -170,8 +175,9 @@ class Library:
 
     def stop(self) -> None:
         self._cancel.set()
-        if self.analyzer is not None:
-            self.analyzer.cancel()
+        for job in (self.analyzer, self.rater):
+            if job is not None:
+                job.cancel()
         if self._thread:
             self._thread.join(timeout=10)
 
@@ -413,8 +419,11 @@ class Library:
         with self._group_lock:
             with self.connect() as c:
                 rows = [dict(r) for r in c.execute(
-                    """SELECT id, path, kind, category, ts, phash, dhash, sha1, size, width, height, sharpness, make, model
-                       FROM media WHERE parent_id IS NULL AND analyzed=1""")]
+                    """SELECT m.id, path, kind, category, ts, phash, dhash, sha1, size, width, height, sharpness, make,
+                       m.model AS model, a.aes AS q_aes, q.faces AS q_faces, q.closed AS q_closed, q.eyes AS q_eyes,
+                       q.face_sharp AS q_face_sharp
+                       FROM media m LEFT JOIN ai a ON a.id = m.id LEFT JOIN quality q ON q.id = m.id
+                       WHERE parent_id IS NULL AND analyzed=1""")]
                 res = grouping.compute(rows, self.settings())
                 c.execute("UPDATE media SET series_id=NULL, series_best=0, dup_id=NULL, dup_best=0, dup_exact=0")
                 c.executemany("UPDATE media SET series_id=?, series_best=? WHERE id=?",
@@ -437,8 +446,9 @@ class Library:
             for r in c.execute(
                     """SELECT id, path, kind, ext, size, media.mtime AS mtime, width, height, ts, ts_source, media.model AS model, lat, lon, duration,
                        sharpness, category, status, series_id, series_best, dup_id, dup_best, dup_exact, error,
-                       match, match_ref, match_strong, cloud, ai.label AS ai
-                       FROM media LEFT JOIN ai USING(id)
+                       match, match_ref, match_strong, cloud, ai.label AS ai, ai.aes AS aes,
+                       quality.faces AS q_faces, quality.closed AS q_closed
+                       FROM media LEFT JOIN ai USING(id) LEFT JOIN quality USING(id)
                        WHERE parent_id IS NULL AND (analyzed=1 OR ?) ORDER BY ts, path""",
                     (not self.scanning,)):
                 kids = extra.get(r["id"], [])
@@ -459,6 +469,7 @@ class Library:
                     "d": r["dup_id"], "db": r["dup_best"], "dx": r["dup_exact"], "cx": cx,
                     "v": int(r["mtime"] or 0), "err": r["error"], "cl": r["cloud"],
                     "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"], "ai": r["ai"],
+                    "qa": None if r["aes"] is None else round(r["aes"], 3), "qf": r["q_faces"], "qc": r["q_closed"],
                     "ph": (None if not found or r["id"] not in found else
                            (found[r["id"]] or (-1 if r["id"] in self.finder.mismatch else
                                                -2 if r["id"] in self.finder.unreadable else 0))),
@@ -473,6 +484,9 @@ class Library:
             d = dict(r)
             d["abs_path"] = str(self.root / r["path"]) if self.kind == "folder" else f"{self.title}: {r['path']}"
             d["children"] = [dict(k) for k in c.execute("SELECT id, path, ext, size FROM media WHERE parent_id=?", (mid,))]
+            q = c.execute("""SELECT a.aes, q.faces, q.closed, q.eyes, q.face_sharp FROM media m LEFT JOIN ai a ON a.id = m.id
+                             LEFT JOIN quality q ON q.id = m.id WHERE m.id=?""", (mid,)).fetchone()
+            d["quality"] = dict(q) if q and any(v is not None for v in q) else None
             d.pop("phash", None)
             d.pop("dhash", None)
             return d

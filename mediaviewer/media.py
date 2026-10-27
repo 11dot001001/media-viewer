@@ -246,8 +246,11 @@ def _open_raw(path: Path) -> tuple[Image.Image, Image.Image | None, tuple[int, i
     return img, meta_img, size
 
 
-def open_oriented(path: Path, ext: str, max_side: int) -> tuple[Image.Image, dict, tuple[int, int]]:
-    """Открыть, повернуть по EXIF, уменьшить до max_side. Возвращает (RGB, мета, исходный размер с учётом поворота)."""
+def open_oriented(path: Path, ext: str, max_side: int, fast: bool = False) -> tuple[Image.Image, dict, tuple[int, int]]:
+    """Открыть, повернуть по EXIF, уменьшить до max_side. Возвращает (RGB, мета, исходный размер с учётом поворота).
+
+    fast: уменьшать грубее, но в 2–3 раза быстрее (для анализа, не для показа).
+    """
     if ext in RAW_EXT:
         img, meta_img, size = _open_raw(path)
         meta = read_meta(meta_img or img)
@@ -265,7 +268,10 @@ def open_oriented(path: Path, ext: str, max_side: int) -> tuple[Image.Image, dic
     if orient in _TRANSPOSE:
         img = img.transpose(_TRANSPOSE[orient])
     if max(img.size) > max_side:
-        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        if fast:
+            img.thumbnail((max_side, max_side), Image.Resampling.BILINEAR, reducing_gap=2.0)
+        else:
+            img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
     return img, meta, size
 
 

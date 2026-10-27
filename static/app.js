@@ -15,6 +15,13 @@ const CATS = {
 // Цвета смысловых категорий (страница «AI»): по порядку из /api/state, «не определено» — серое
 const AI_COLORS = ['#f59e8b', '#e0a458', '#f472b6', '#4ade80', '#60a5fa', '#94a3b8', '#facc15', '#22d3ee', '#c084fc', '#a8a29e'];
 const AI_OTHER = { key: 'other', label: 'Не определено', color: '#6b7280' };
+// Оценка кадра (страница «AI»): «лучшие» — красота кадра по SigLIP не ниже порога (≈ лучшие 7 % снимков из поездки)
+const AES_BEST = 0.25;
+const QUALITY_CATS = [
+  { key: 'q:closed', label: 'Закрыты глаза', color: '#fb7185', hint: 'У кого-то в кадре закрыты глаза', test: it => it.qc > 0 },
+  { key: 'q:best', label: 'Лучшие кадры', color: '#fbbf24', hint: 'Самые красивые снимки по оценке нейросети', test: it => it.qa >= AES_BEST },
+];
+const aiMatch = (it, k) => { const q = QUALITY_CATS.find(c => c.key === k); return q ? q.test(it) : it.ai === k; };
 const PHONE_ICON = '<svg class="i"><use href="#i-phone"/></svg>';
 const TS_SOURCE = { exif: 'из EXIF', name: 'из имени файла', mtime: 'дата изменения файла' };
 const PLAYABLE = new Set(['.mp4', '.m4v', '.webm', '.mov']);
@@ -257,7 +264,7 @@ async function loadItems() {
 // ============================================================ фильтры
 function passFilters(it, useStatus = true) {
   if (!S.cats.has(it.c)) return false;
-  if (S.aiSel.size && !S.aiSel.has(it.ai)) return false;
+  if (S.aiSel.size && ![...S.aiSel].some(k => aiMatch(it, k))) return false;
   if (S.search && !S.search.rank.has(it.id)) return false;
   if (S.match && (it.m || 'new') !== S.match) return false;
   if (useStatus && S.status !== 'all' && it.st !== +S.status) return false;
@@ -378,14 +385,21 @@ function aiLabels() {
 
 function renderAiSide() {
   const counts = {};
-  for (const it of S.items) if (it.ai) counts[it.ai] = (counts[it.ai] || 0) + 1;
-  const any = Object.keys(counts).length > 0;
+  let rated = false;
+  for (const it of S.items) {
+    if (it.ai) counts[it.ai] = (counts[it.ai] || 0) + 1;
+    if (it.qf != null || it.qa != null) rated = true;
+    for (const q of QUALITY_CATS) if (q.test(it)) counts[q.key] = (counts[q.key] || 0) + 1;
+  }
+  const any = Object.keys(counts).length > 0 || rated;
   $('#aiSec').classList.toggle('hidden', !any);
   $('#aiReset').classList.toggle('hidden', !S.aiSel.size && !S.search);
   if (!any) return;
-  $('#aiCats').innerHTML = aiLabels().filter(l => counts[l.key]).map(l =>
-    `<div class="cat ${S.aiSel.has(l.key) ? 'active' : ''}" data-ai="${l.key}" title="Клик — показать только их (можно выбрать несколько)">
-       <span class="dot" style="background:${l.color}"></span>${l.label}<span class="cnt">${counts[l.key]}</span></div>`).join('');
+  const row = (l, title) => `<div class="cat ${S.aiSel.has(l.key) ? 'active' : ''}" data-ai="${l.key}" title="${title}">
+       <span class="dot" style="background:${l.color}"></span>${l.label}<span class="cnt">${counts[l.key] || ''}</span></div>`;
+  const quality = QUALITY_CATS.filter(q => counts[q.key]);
+  $('#aiCats').innerHTML = aiLabels().filter(l => counts[l.key]).map(l => row(l, 'Клик — показать только их (можно выбрать несколько)')).join('') +
+    (quality.length ? '<div class="cats-sep">Оценка кадра</div>' + quality.map(q => row(q, q.hint + '. Клик — показать только их')).join('') : '');
 }
 
 function renderCats() {
@@ -441,6 +455,7 @@ function tileHTML(it, o = {}) {
   else if (it.ph === 0) b.push(`<span class="bdg nophone" title="На телефоне не найден">${PHONE_ICON}<i>✕</i></span>`);
   else if (it.ph === -2) b.push(`<span class="bdg phmis" title="Не удалось прочитать файл с телефона для сверки — разблокируйте iPhone и повторите поиск">${PHONE_ICON}<i>?</i></span>`);
   else if (it.ph === -1) b.push(`<span class="bdg phmis" title="На телефоне есть файл того же размера и даты, но содержимое другое — его не удалим">${PHONE_ICON}<i>≠</i></span>`);
+  if (it.qc > 0) b.push(`<span class="bdg eyes" title="Закрыты глаза: ${it.qc} из ${plural(it.qf, 'лица', 'лиц', 'лиц')}"><svg class="i"><use href="#i-eye-off"/></svg></span>`);
   if (it.d) b.push(`<span class="bdg dup" title="${it.dx ? 'Есть точная копия' : 'Есть похожий дубликат'}">⧉</span>`);
   for (const c of it.cx || []) b.push(`<span class="bdg cx" title="${c === 'RAW' ? 'Есть RAW-файл с тем же именем' : c === 'LIVE' ? 'Live Photo: есть видео с тем же именем' : 'Связанный файл'}">${c}</span>`);
   if (it.err) b.push(`<span class="bdg err" title="${esc(it.err)}">!</span>`);
@@ -1134,6 +1149,16 @@ function vZoom(ev) {
   box.scrollTop = ry * nh - box.clientHeight / 2;
 }
 
+function qualityText(q) {
+  const parts = [];
+  // шкала SigLIP неравномерная (у половины снимков меньше 0.07), поэтому словами, а не числом
+  if (q.aes != null) parts.push(`красота кадра: ${q.aes >= AES_BEST ? 'высокая, один из лучших' : q.aes >= 0.07 ? 'средняя' : 'низкая'}`);
+  if (q.faces) {
+    parts.push(`${plural(q.faces, 'лицо', 'лица', 'лиц')}${q.closed ? `, <span style="color:var(--reject)">закрыты глаза у ${q.closed}</span>` : ', глаза открыты'}`);
+  } else if (q.faces === 0) parts.push('лиц нет');
+  return parts.join('<br>') || '—';
+}
+
 async function loadInfo(it) {
   const el = $('#vInfo');
   el.classList.remove('hidden');
@@ -1151,6 +1176,7 @@ async function loadInfo(it) {
     ['Категория', CATS[d.category]?.label || d.category],
     d.duration ? ['Длительность', fmtDur(d.duration)] : null,
     d.sharpness != null ? ['Резкость', Math.round(d.sharpness)] : null,
+    d.quality ? ['Оценка кадра', qualityText(d.quality)] : null,
     ['Место', d.lat != null ? `${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}<br><button class="link" data-act="onmap">показать на карте</button>` : '—'],
     d.children?.length ? ['Связанные', d.children.map(c => esc(c.path.split('/').pop()) + ' · ' + fmtSize(c.size)).join('<br>')] : null,
     it.s ? ['Серия', `${S.series.get(it.s)?.length || ''} кадров${it.sb ? ' · ★ рекомендован' : ''}`] : null,
@@ -1226,7 +1252,9 @@ function showReview() {
     $('#rTitle').textContent = `Серия · ${plural(n, 'кадр', 'кадра', 'кадров')}`;
     $('#rSub').textContent = [fmtDT(first.t), `за ${(last.t - first.t).toFixed(1)} с`, first.cam,
       pos >= 0 ? `серия ${pos + 1} из ${order.length}, не разобрано ещё ${left}` : '',
-      R.suggested ? '★ отмечены самые резкие — проверьте и нажмите Enter' : ''].filter(Boolean).join(' · ');
+      R.suggested ? (R.items.some(i => i.qf != null || i.qa != null)
+        ? '★ отмечены лучшие по резкости, глазам и красоте кадра — проверьте и нажмите Enter'
+        : '★ отмечены самые резкие — проверьте и нажмите Enter') : ''].filter(Boolean).join(' · ');
   } else {
     $('#rTitle').textContent = `Сравнение · ${plural(n, 'файл', 'файла', 'файлов')}`;
     $('#rSub').textContent = 'Клик по кадру — оставить или удалить';
@@ -1247,6 +1275,7 @@ function showReview() {
     const best = R.mode === 'series' ? it.sb : it.id === sharpest.id && it.k === 'i';
     return `<div class="rf" data-id="${it.id}">
       ${best ? `<span class="best-tag">★ ${R.mode === 'series' ? 'рекомендуется' : 'самый резкий'}</span>` : ''}
+      ${it.qc > 0 ? `<span class="eyes-tag" title="Закрыты глаза: ${it.qc} из ${plural(it.qf, 'лица', 'лиц', 'лиц')}"><svg class="i"><use href="#i-eye-off"/></svg>закрыты глаза</span>` : ''}
       <div class="rf-img"><img alt=""></div>
       <div class="rf-bar"><span class="n">${i < 9 ? i + 1 : ''}</span><span>${R.mode === 'series' ? fmtTime(it.t) : esc(fileName(it))}</span>
         ${it.sh != null ? `<span class="sharp" title="Резкость: ${Math.round(it.sh)}"><i style="width:${Math.round((it.sh / maxSh) * 100)}%"></i></span>` : ''}
@@ -1395,10 +1424,15 @@ async function onAction(act, el) {
     case 'fold': setFolded([el.dataset.key], !S.folded.has(el.dataset.key)); break;
     case 'fold-all': setView('grid'); setFolded(new Set(gridList().map(groupKey)), true); break;
     case 'unfold-all': setView('grid'); setFolded([...S.folded], false); break;
-    case 'ai-install': aiCall('/api/ai/install'); break;
-    case 'ai-remove':
-      if (await confirmModal('Удалить модель?', `<p>С диска будут удалены файлы модели (${fmtSize(S.aiInfo?.size)}). Результаты уже проведённого анализа останутся.</p><p class="muted">Скачать модель снова можно на этой же странице.</p>`, 'Удалить', true)) aiCall('/api/ai/remove');
+    case 'ai-install': aiCall('/api/ai/install', { model: el.dataset.model }); break;
+    case 'ai-remove': {
+      const m = el.dataset.model === 'faces' ? S.aiInfo?.faces : S.aiInfo;
+      if (await confirmModal('Удалить модель?', `<p>С диска будут удалены файлы модели (${fmtSize(m?.size)}). Результаты уже проведённого анализа останутся.</p><p class="muted">Скачать модель снова можно на этой же странице.</p>`, 'Удалить', true)) aiCall('/api/ai/remove', { model: el.dataset.model });
       break;
+    }
+    case 'ai-rate': aiCall('/api/ai/rate'); break;
+    case 'ai-rate-stop': aiCall('/api/ai/rate-stop'); break;
+    case 'q-cat': S.aiSel = new Set([el.dataset.key]); S.search = null; $('#aiQuery').value = ''; S.view = 'grid'; filtersChanged(); break;
     case 'ai-analyze': aiCall('/api/ai/analyze'); break;
     case 'ai-stop': aiCall('/api/ai/stop'); break;
     case 'ai-cat': S.aiSel = new Set([el.dataset.key]); S.search = null; $('#aiQuery').value = ''; S.view = 'grid'; filtersChanged(); break;
@@ -1677,8 +1711,8 @@ async function openFolder(path) {
 // ============================================================ нейросеть (страница «AI»)
 let aiTimer = null;
 
-async function aiCall(url) {
-  try { S.aiInfo = await api(url, {}); } catch (e) { toast(esc(e.message), true); }
+async function aiCall(url, body = {}) {
+  try { S.aiInfo = await api(url, body); } catch (e) { toast(esc(e.message), true); }
   aiPoll();
 }
 
@@ -1687,24 +1721,32 @@ async function aiPoll() {
   clearTimeout(aiTimer);
   aiTimer = null;
   const wasRunning = S.aiInfo?.analysis?.running;
+  const wasRating = S.aiInfo?.quality?.running;
   let info;
   try { info = await api('/api/ai'); } catch { return; }
   const changed = JSON.stringify(info) !== JSON.stringify(S.aiInfo);
   S.aiInfo = info;
   S.ai.ready = info.packages && info.installed;
-  const a = info.analysis;
-  const running = info.busy || a?.running;
+  const a = info.analysis, q = info.quality;
+  const running = info.busy || info.faces?.busy || a?.running || q?.running;
   if (wasRunning && !a?.running) {
     loadItems();
     if (a?.phase === 'done') toast('Анализ завершён: категории по смыслу и поиск — в панели слева');
     if (a?.phase === 'error') toast(esc(a.message), true, 8000);
-  } else if (a?.running && Date.now() - lastLoad > 8000) loadItems();
-  if (info.job?.phase === 'error' && aiPoll.shownErr !== info.job.message) {
-    aiPoll.shownErr = info.job.message;
-    toast(esc(info.job.message), true, 10000);
+  } else if (wasRating && !q?.running) {
+    loadItems();
+    if (q?.phase === 'done') toast(`Оценка завершена${q.closed ? `: закрыты глаза на ${plural(q.closed, 'кадре', 'кадрах', 'кадрах')}` : ''}. ★ в сериях выбраны заново`);
+    if (q?.phase === 'error') toast(esc(q.message), true, 8000);
+  } else if ((a?.running || q?.running) && Date.now() - lastLoad > 8000) loadItems();
+  for (const job of [info.job, info.faces?.job]) {
+    if (job?.phase === 'error' && aiPoll.shownErr !== job.message) {
+      aiPoll.shownErr = job.message;
+      toast(esc(job.message), true, 10000);
+    }
   }
   if (S.view === 'ai' && changed) renderAI();  // без изменений не перерисовываем: иначе сбивается наведение на кнопки
-  $('#cnt-ai').textContent = a?.running && a.total ? Math.floor(a.done / a.total * 100) + ' %' : info.busy ? '…' : '';
+  const job = a?.running ? a : q?.running ? q : null;
+  $('#cnt-ai').textContent = job && job.total ? Math.floor(job.done / job.total * 100) + ' %' : running ? '…' : '';
   if (running || S.view === 'ai') aiTimer = setTimeout(aiPoll, running ? 800 : 3000);
 }
 
@@ -1725,52 +1767,74 @@ function aiBar(done, total, indet) {
   return `<div class="bar ai-bar${indet ? ' indet' : ''}"><i style="width:${indet ? '' : (total ? done / total * 100 : 0).toFixed(1) + '%'}"></i></div>`;
 }
 
+/** Состояние скачивания модели: прогресс, «Скачать» или «Удалить». */
+function modelBlock(m, model, what) {
+  const job = m.job || {};
+  if (m.busy) {
+    const det = job.phase === 'download' && job.total;
+    return `<p>${esc(job.message)}${det ? ` <span class="mono">${fmtSize(job.done)} из ${fmtSize(job.total)}</span>` : ''}</p>${aiBar(job.done, job.total, !det)}
+      <p class="muted">Установка идёт в фоне, разбор можно продолжать. Если скачивание прервётся, оно продолжится с того же места.</p>`;
+  }
+  if (m.packages && m.installed) {
+    return `<p>Модель скачана${m.size ? ` (${fmtSize(m.size)})` : ''}.${m.device ? ` Считает: <b>${esc(m.device)}</b>.` : ''}</p>
+      <div class="ai-acts"><button class="btn small ghost" data-act="ai-remove" data-model="${model}">Удалить модель</button></div>`;
+  }
+  return `<p>${what}${job.phase === 'error' ? `<br><span class="err-text">${esc(job.message)}</span>` : ''}</p>
+    <div class="ai-acts"><button class="btn primary" data-act="ai-install" data-model="${model}"><svg class="i"><use href="#i-sparkles"/></svg>${job.phase === 'error' ? 'Повторить' : 'Скачать модель'}</button></div>`;
+}
+
+/** Прогресс и кнопка запуска для анализа папки (SigLIP) и оценки кадров (лица). */
+function jobBlock(a, ready, startAct, stopAct, verb, what) {
+  const left = Math.max(0, a.total - a.done);
+  const rate = a.running && a.done > 0 && a.started ? a.done / (Date.now() / 1000 - a.started) : 0;
+  const eta = rate && a.total > a.done ? ` · осталось ≈ ${fmtDur((a.total - a.done) / rate) || '0:01'}` : '';
+  const head = a.running
+    ? (a.phase === 'load' ? 'Загрузка модели…' : `${esc(a.message)} · ${a.done} из ${a.total}${eta}`)
+    : !left && a.total ? `Все ${what} обработаны: <b>${a.total}</b>`
+      : `Обработано <b>${a.done}</b> из ${a.total}${left && a.done ? ` · новых: ${left}` : ''}`;
+  const btn = a.running
+    ? `<button class="btn" data-act="${stopAct}">Остановить</button>`
+    : !left && a.total ? ''
+      : `<button class="btn primary" data-act="${startAct}" ${ready ? '' : 'disabled'}><svg class="i"><use href="#i-sparkles"/></svg>${a.done ? `${verb} новые (${left})` : `${verb} ${what}`}</button>`;
+  return `<p>${head}</p>${aiBar(a.done, a.total, a.running && a.phase === 'load')}
+    ${btn ? `<div class="ai-acts">${btn}</div>` : ''}
+    ${a.phase === 'error' ? `<p class="err-text">${esc(a.message)}</p>` : ''}`;
+}
+
 function renderAI() {
   const el = $('#view-ai');
   const info = S.aiInfo;
   if (!info) { el.innerHTML = '<div class="list-head"><h2>AI</h2></div>'; if (!aiTimer) aiPoll(); return; }
   if (!aiTimer) aiTimer = setTimeout(aiPoll, 3000);
   const ready = info.packages && info.installed;
-  const job = info.job || {};
   const installing = info.busy;
   const a = info.analysis;
+  const pillOf = m => (m.busy ? '<span class="pill">Установка…</span>' : m.packages && m.installed ? '<span class="pill ok">Установлена</span>' : '<span class="pill">Не установлена</span>');
 
-  // 1. Модель
-  let model;
-  if (installing) {
-    const det = job.phase === 'download' && job.total;
-    model = `<p>${esc(job.message)}${det ? ` <span class="mono">${fmtSize(job.done)} из ${fmtSize(job.total)}</span>` : ''}</p>${aiBar(job.done, job.total, !det)}
-      <p class="muted">Установка идёт в фоне, разбор можно продолжать. Если скачивание прервётся, оно продолжится с того же места.</p>`;
-  } else if (ready) {
-    model = `<p>Модель скачана${info.size ? ` (${fmtSize(info.size)})` : ''}.${info.device ? ` Считает: <b>${esc(info.device)}</b>.` : ''}</p>
-      <div class="ai-acts"><button class="btn small ghost" data-act="ai-remove">Удалить модель</button></div>`;
-  } else {
-    model = `<p>Скачивается один раз: модель (≈ ${fmtSize(info.download_size)}) и ONNX Runtime для расчётов на видеокарте.${job.phase === 'error' ? `<br><span class="err-text">${esc(job.message)}</span>` : ''}</p>
-      <div class="ai-acts"><button class="btn primary" data-act="ai-install"><svg class="i"><use href="#i-sparkles"/></svg>${job.phase === 'error' ? 'Повторить' : 'Скачать модель'}</button></div>`;
-  }
-  const pill = installing ? '<span class="pill">Установка…</span>' : ready ? '<span class="pill ok">Установлена</span>' : '<span class="pill">Не установлена</span>';
+  // 1. Модель SigLIP
+  const model = modelBlock(info, 'siglip2-base-224', `Скачивается один раз: модель (≈ ${fmtSize(info.download_size)}) и ONNX Runtime для расчётов на видеокарте.`);
+  const pill = pillOf(info);
 
   // 2. Анализ папки
-  let analysis;
-  if (!S.root || !a) {
-    analysis = '<p class="muted">Откройте папку, чтобы проанализировать её снимки.</p>';
-  } else {
-    const left = Math.max(0, a.total - a.done);
-    const rate = a.running && a.done > 0 && a.started ? a.done / (Date.now() / 1000 - a.started) : 0;
-    const eta = rate && a.total > a.done ? ` · осталось ≈ ${fmtDur((a.total - a.done) / rate) || '0:01'}` : '';
-    const head = a.running
-      ? (a.phase === 'load' ? 'Загрузка модели…' : `${esc(a.message)} · ${a.done} из ${a.total}${eta}`)
-      : !left && a.total ? `Все снимки проанализированы: <b>${a.total}</b>`
-        : `Проанализировано <b>${a.done}</b> из ${a.total}${left && a.done ? ` · новых: ${left}` : ''}`;
-    const btn = a.running
-      ? '<button class="btn" data-act="ai-stop">Остановить</button>'
-      : !left && a.total ? ''
-        : `<button class="btn primary" data-act="ai-analyze" ${ready && !installing ? '' : 'disabled'}><svg class="i"><use href="#i-sparkles"/></svg>${a.done ? `Проанализировать новые (${left})` : 'Запустить анализ'}</button>`;
-    analysis = `<p>${head}</p>${aiBar(a.done, a.total, a.running && a.phase === 'load')}
-      ${btn ? `<div class="ai-acts">${btn}</div>` : ''}
-      ${!ready ? '<p class="muted">Сначала скачайте модель.</p>' : ''}
-      ${a.phase === 'error' ? `<p class="err-text">${esc(a.message)}</p>` : ''}`;
-  }
+  const analysis = !S.root || !a ? '<p class="muted">Откройте папку, чтобы проанализировать её снимки.</p>'
+    : a.no_aes && !a.running && a.done >= a.total
+      ? `<p>Снимки проанализированы, но без оценки красоты кадра (она появилась позже): ${a.no_aes}. Досчитать её можно за секунды.</p>
+        <div class="ai-acts"><button class="btn primary" data-act="ai-analyze" ${ready && !installing ? '' : 'disabled'}><svg class="i"><use href="#i-sparkles"/></svg>Досчитать</button></div>`
+      : jobBlock(a, ready && !installing, 'ai-analyze', 'ai-stop', 'Проанализировать', 'снимки') + (!ready ? '<p class="muted">Сначала скачайте модель.</p>' : '');
+
+  // 4. Оценка кадра: модели лиц и запуск
+  const f = info.faces, q = info.quality;
+  const facesReady = f.packages && f.installed;
+  let rate = '';
+  if (facesReady && S.root && q) {
+    rate = jobBlock(q, !f.busy, 'ai-rate', 'ai-rate-stop', 'Оценить', 'фото');
+    if (q.done) {
+      rate += `<div class="ai-chips">${QUALITY_CATS.map(c => {
+        const n = c.key === 'q:closed' ? q.closed : S.items.filter(c.test).length;
+        return n ? `<button class="ai-chip" data-act="q-cat" data-key="${c.key}"><span class="dot" style="background:${c.color}"></span>${c.label}<span class="cnt">${n}</span></button>` : '';
+      }).join('')}</div>`;
+    }
+  } else if (facesReady) rate = '<p class="muted">Откройте папку, чтобы оценить её снимки.</p>';
 
   // 3. Категории по смыслу
   const counts = a?.labels || {};
@@ -1786,8 +1850,10 @@ function renderAI() {
       <div class="card ai-card wide"><div class="card-head"><span class="t">Категории по смыслу</span></div>
         ${cats ? `<div class="ai-chips">${cats}</div><p class="muted">Клик — показать в ленте. Поиск по описанию — в панели слева, раздел «По смыслу».</p>`
           : '<p class="muted">Появятся после анализа: люди, животные, еда, природа, город, транспорт, документы и чеки, экраны, мемы, случайные кадры.</p>'}</div>
-      <div class="card ai-card soon"><div class="card-head"><span class="t">Оценка качества кадра</span><span class="pill">Скоро</span></div>
-        <p class="muted">Закрытые глаза, смаз, неудачная композиция: подсказка, какой кадр серии оставить.</p></div>
+      <div class="card ai-card wide"><div class="card-head"><span class="t">Оценка кадра</span>${pillOf(f)}</div>
+        <p class="muted">Находит лица и проверяет, не закрыты ли глаза и не смазаны ли лица. Вместе с красотой кадра по SigLIP это решает, какой кадр серии отметить ★. Для снимков с людьми читается оригинал, остальные оцениваются по миниатюре.</p>
+        ${modelBlock(f, 'faces', `Скачиваются две маленькие модели лиц (≈ ${fmtSize(f.download_size)}): YuNet и MediaPipe Face Mesh.${f.packages ? '' : ' Если ONNX Runtime ещё не установлен, он поставится вместе с ними.'}`)}
+        ${rate}</div>
     </div>`;
 }
 

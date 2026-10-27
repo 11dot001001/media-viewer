@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ai, matching, media, trash
+from . import ai, matching, media, quality, trash
 from .journal import Journal
 from .library import Library
 from .phone import FolderDevice, PhoneLibrary, WpdDevice
@@ -25,7 +25,8 @@ DATA = BASE / "data"
 DATA.mkdir(exist_ok=True)
 RECENT_FILE = DATA / "recent.json"
 
-AI = ai.Manager(DATA)
+AI = ai.Manager(DATA)  # SigLIP 2: категории по смыслу, поиск, красота кадра
+FACES = ai.faces_manager(DATA)  # модели лиц: оценка кадра
 
 app = FastAPI(title="Media Viewer")
 app.add_middleware(GZipMiddleware, minimum_size=2048)
@@ -129,7 +130,7 @@ def state():
         "settings": s.__dict__ if s else None,
         "trash_target": _lib.trash_target() if _lib else None,
         "tools": {"ffmpeg": bool(media.FFMPEG), "heif": media.HEIF_OK, "raw": media.rawpy is not None},
-        "ai": {"ready": AI.ready(), "labels": AI.info()["labels"]},
+        "ai": {"ready": AI.ready(), "labels": _ai_labels()},
     }
 
 
@@ -344,12 +345,30 @@ def open_external(mid: int):
 
 # ---------------------------------------------------------------- нейросеть (страница «AI»)
 
+def _ai_labels() -> list[dict]:
+    return [{"key": k, "label": lbl} for k, lbl, _, _ in ai.LABELS]
+
+
+def _job(job, counts: dict) -> dict:
+    return dict(job.status if job else {"phase": "idle"}, running=bool(job and job.running), **counts)
+
+
 def _ai_state() -> dict:
     res = AI.info()
+    res["labels"] = _ai_labels()
+    res["faces"] = FACES.info()
     if _lib is not None:
-        an = _lib.analyzer
-        res["analysis"] = dict(an.status if an else {"phase": "idle"}, running=bool(an and an.running), **ai.counts(_lib))
+        res["analysis"] = _job(_lib.analyzer, ai.counts(_lib))
+        res["quality"] = _job(_lib.rater, quality.counts(_lib))
     return res
+
+
+class ModelReq(BaseModel):
+    model: str = ai.MODEL
+
+
+def _manager(req: ModelReq | None) -> ai.Manager:
+    return FACES if req and req.model == ai.FACES else AI
 
 
 @app.get("/api/ai")
@@ -358,18 +377,23 @@ def ai_state():
 
 
 @app.post("/api/ai/install")
-def ai_install():
-    AI.install()
+def ai_install(req: ModelReq | None = None):
+    m = _manager(req)
+    if (AI if m is FACES else FACES).busy():
+        raise HTTPException(409, "Дождитесь окончания другой установки")
+    m.install()
     return _ai_state()
 
 
 @app.post("/api/ai/remove")
-def ai_remove():
+def ai_remove(req: ModelReq | None = None):
+    m = _manager(req)
     lb = _lib
-    if lb is not None and lb.analyzer is not None and lb.analyzer.running:
+    job = None if lb is None else lb.rater if m is FACES else lb.analyzer
+    if job is not None and job.running:
         raise HTTPException(409, "Сначала остановите анализ")
     try:
-        AI.remove()
+        m.remove()
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return _ai_state()
@@ -409,3 +433,24 @@ def ai_search(req: SearchReq):
         return {"hits": ai.search(lib(), AI, q)}
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
+
+
+@app.post("/api/ai/rate")
+def ai_rate():
+    lb = lib()
+    if not FACES.ready():
+        raise HTTPException(409, "Сначала скачайте модели лиц")
+    if lb.scanning:
+        raise HTTPException(409, "Дождитесь окончания сканирования папки")
+    if lb.rater is None:
+        lb.rater = quality.Rater(lb, FACES)
+    lb.rater.start()
+    return _ai_state()
+
+
+@app.post("/api/ai/rate-stop")
+def ai_rate_stop():
+    lb = lib()
+    if lb.rater is not None:
+        lb.rater.cancel()
+    return _ai_state()

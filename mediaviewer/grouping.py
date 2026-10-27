@@ -9,6 +9,7 @@ import numpy as np
 
 NEAR_DUP_PHASH = 6
 NEAR_DUP_DHASH = 10
+AES_FLOOR = 0.2  # см. _series_best
 
 
 @dataclass
@@ -70,6 +71,30 @@ def _quality_key(r: dict):
             not _COPY_MARK.search(name), "dcim/" in r["path"].lower(), -len(r["path"]))
 
 
+def _series_best(run: list[dict], k: int) -> list[dict]:
+    """Какие кадры серии оставить. Без оценки нейросетью — самые резкие.
+
+    С оценкой (страница «AI»): сначала кадры, где ни у кого не закрыты глаза, затем по сумме резкости,
+    открытости глаз и красоты кадра — каждое относительно лучшего кадра этой же серии.
+    Если лица есть на всех кадрах, важна резкость лиц, а не всего кадра.
+    """
+    rated = any(r.get("q_faces") is not None or r.get("q_aes") is not None for r in run)
+    if not rated:
+        return sorted(run, key=lambda r: (r["sharpness"] or 0, _quality_key(r)), reverse=True)[:k]
+    sharp_key = "q_face_sharp" if all(r.get("q_face_sharp") for r in run) else "sharpness"
+    top_sharp = max(r[sharp_key] or 0 for r in run) or 1
+    # Не меньше AES_FLOOR: у неудачных кадров красота 0.01–0.05, и разница 0.011 против 0.013 — шум, а не причина
+    top_aes = max(AES_FLOOR, *(r.get("q_aes") or 0 for r in run))
+
+    def key(r):
+        eyes = r.get("q_eyes")
+        score = (0.45 * (r[sharp_key] or 0) / top_sharp + 0.25 * (r.get("q_aes") or 0) / top_aes
+                 + 0.30 * (1.0 if eyes is None else eyes))
+        return -(r.get("q_closed") or 0), score, _quality_key(r)
+
+    return sorted(run, key=key, reverse=True)[:k]
+
+
 def compute(rows: list[dict], s: Settings) -> Result:
     res = Result()
 
@@ -107,8 +132,7 @@ def compute(rows: list[dict], s: Settings) -> Result:
         for r in run:
             res.series_id[r["id"]] = sid
         k = _keep_count(len(run), s.series_keep)
-        best = sorted(run, key=lambda r: (r["sharpness"] or 0, _quality_key(r)), reverse=True)[:k]
-        res.series_best.update(r["id"] for r in best)
+        res.series_best.update(r["id"] for r in _series_best(run, k))
 
     # ---------- дубликаты
     uf = _UF()
