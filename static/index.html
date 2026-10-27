@@ -68,102 +68,127 @@
 
 <div id="layout">
   <aside id="sidebar">
-    <nav id="views">
-      <button data-view="grid" class="active"><svg class="i"><use href="#i-grid"/></svg>Лента<span class="cnt" id="cnt-grid"></span></button>
-      <button data-view="series"><svg class="i"><use href="#i-layers"/></svg>Серии<span class="cnt" id="cnt-series"></span></button>
-      <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
-      <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
-      <button data-view="trash"><svg class="i"><use href="#i-trash"/></svg>Корзина отбора<span class="cnt" id="cnt-trash"></span></button>
-      <button data-view="ai"><svg class="i"><use href="#i-sparkles"/></svg>AI<span class="cnt" id="cnt-ai"></span></button>
-    </nav>
-
-    <section id="matchSec" class="hidden">
-      <h4><svg class="i"><use href="#i-cloud"/></svg>Сверка с облаком</h4>
-      <div id="matchList" class="cats"></div>
-      <button class="btn small wide" id="btnMarkCloud" style="margin-top:8px" title="Эти снимки уже сохранены в облаке — на телефоне они не нужны">«Есть в облаке» → к удалению</button>
-      <button class="btn small wide ghost" id="btnRefs" style="margin-top:6px">Папки облака…</button>
-    </section>
-
-    <section id="aiSec" class="hidden">
-      <h4><svg class="i"><use href="#i-sparkles"/></svg>По смыслу <button id="aiReset" class="link hidden">сбросить</button></h4>
-      <form id="aiSearch" class="ai-search" autocomplete="off">
+    <div class="sb-top">
+      <form id="aiSearch" class="sb-search" autocomplete="off">
         <svg class="i"><use href="#i-search"/></svg>
-        <input id="aiQuery" type="search" placeholder="Найти: море, кот, чек…" title="Поиск по описанию того, что на снимке. Enter — искать, Esc — сбросить">
+        <input id="aiQuery" type="search" placeholder="Поиск по имени файла" title="Enter — искать, Esc — сбросить">
+        <kbd class="sb-key" title="Клавиша / — перейти к поиску">/</kbd>
       </form>
-      <div id="aiCats" class="cats"></div>
-    </section>
+      <nav id="views">
+        <button data-view="grid" class="active"><svg class="i"><use href="#i-grid"/></svg>Лента<span class="cnt" id="cnt-grid"></span></button>
+        <button data-view="series"><svg class="i"><use href="#i-layers"/></svg>Серии<span class="cnt" id="cnt-series"></span></button>
+        <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
+        <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
+        <button data-view="trash"><svg class="i"><use href="#i-trash"/></svg>Корзина отбора<span class="cnt" id="cnt-trash"></span></button>
+        <button data-view="ai"><svg class="i"><use href="#i-sparkles"/></svg>AI<span class="cnt" id="cnt-ai"></span></button>
+      </nav>
+    </div>
 
-    <section>
-      <h4>Категории</h4>
-      <div id="cats" class="cats"></div>
-    </section>
+    <div class="sb-scroll">
+      <section id="matchSec" class="sb-group hidden" data-group="match">
+        <button class="sb-head" data-act="fold-group" data-fold-group="match"><svg class="i"><use href="#i-cloud"/></svg>Сверка с облаком<i class="chev"></i></button>
+        <div class="sb-body">
+          <div id="matchList" class="cats"></div>
+          <button class="btn small wide" id="btnMarkCloud" title="Эти снимки уже сохранены в облаке — на телефоне они не нужны">«Есть в облаке» → к удалению</button>
+          <button class="btn small wide ghost" id="btnRefs">Папки облака…</button>
+        </div>
+      </section>
 
-    <section>
-      <h4>Статус</h4>
-      <div id="statusFilter" class="seg">
-        <button data-v="all" class="active">Все</button>
-        <button data-v="0" title="Ещё не разобранные">Новые</button>
-        <button data-v="1" title="Отмеченные «оставить»"><svg class="i"><use href="#i-check"/></svg></button>
-        <button data-v="2" title="Отмеченные к удалению"><svg class="i"><use href="#i-x"/></svg></button>
+      <div class="sb-filters">
+        <span class="sb-title">Фильтры</span><span id="fltCount" class="flt-count hidden"></span>
+        <button id="fltReset" class="link hidden" title="Сбросить все фильтры и поиск">Сбросить</button>
       </div>
-    </section>
 
-    <section>
-      <h4>Период <button id="dateReset" class="link hidden">сбросить</button></h4>
-      <div class="dates">
-        <input type="date" id="dateFrom">
-        <span>—</span>
-        <input type="date" id="dateTo">
-      </div>
-    </section>
+      <section class="sb-group" data-group="type">
+        <button class="sb-head" data-act="fold-group" data-fold-group="type">Тип<span class="sb-val" id="typeVal"></span><i class="chev"></i></button>
+        <div class="sb-body"><div id="cats" class="chips"></div></div>
+      </section>
 
-    <section>
-      <h4>Вид</h4>
-      <label class="row" title="Ctrl + колесо мыши или «щипок» на тачпаде">В ряду <span class="range-val"><input type="range" id="colsRange" min="2" max="30" step="1"><span id="colsVal" class="mono"></span></span></label>
-      <div id="granSeg" class="seg" title="Группировка ленты — меняется вместе с масштабом">
-        <button data-g="day">Дни</button>
-        <button data-g="month">Месяцы</button>
-        <button data-g="year">Годы</button>
-      </div>
-      <div class="hint-line"><kbd>Ctrl</kbd> + колесо — масштаб ленты</div>
-      <label class="row">Порядок
-        <select id="sortOrder">
-          <option value="desc">Сначала новые</option>
-          <option value="asc">Сначала старые</option>
-          <option value="size">Сначала тяжёлые</option>
-        </select>
-      </label>
-      <label class="row check"><input type="checkbox" id="collapseSeries"> Сворачивать серии</label>
-      <div class="fold-btns">
-        <button class="btn small ghost" data-act="fold-all" title="Свернуть все дни в ленте">Свернуть дни</button>
-        <button class="btn small ghost" data-act="unfold-all" title="Развернуть все дни в ленте">Развернуть</button>
-      </div>
-    </section>
+      <section id="aiSec" class="sb-group hidden" data-group="ai">
+        <button class="sb-head" data-act="fold-group" data-fold-group="ai"><svg class="i"><use href="#i-sparkles"/></svg>Что на снимке<span class="sb-val" id="aiVal"></span><i class="chev"></i></button>
+        <div class="sb-body">
+          <div id="aiCats" class="chips"></div>
+          <div id="qCats" class="chips q-chips"></div>
+        </div>
+      </section>
 
-    <details class="side-more">
-      <summary><svg class="i"><use href="#i-sliders"/></svg>Поиск серий</summary>
-      <label class="row">Пауза между кадрами, с <input type="number" id="setGap" min="1" max="600" step="1"></label>
-      <label class="row">Похожесть <span class="range-val"><input type="range" id="setDist" min="6" max="32" step="1"><span id="setDistVal" class="mono"></span></span></label>
-      <label class="row">Оставлять из серии
-        <select id="setKeep">
-          <option value="auto">авто (1–2)</option>
-          <option value="1">1 кадр</option>
-          <option value="2">2 кадра</option>
-          <option value="3">3 кадра</option>
-        </select>
-      </label>
-      <button id="btnRegroup" class="btn small wide">Пересчитать</button>
-    </details>
+      <section class="sb-group" data-group="status">
+        <button class="sb-head" data-act="fold-group" data-fold-group="status">Статус<i class="chev"></i></button>
+        <div class="sb-body">
+          <div id="statusFilter" class="seg">
+            <button data-v="all" class="active">Все</button>
+            <button data-v="0" title="Ещё не разобранные">Новые</button>
+            <button data-v="1" title="Отмеченные «оставить»"><svg class="i"><use href="#i-check"/></svg></button>
+            <button data-v="2" title="Отмеченные к удалению"><svg class="i"><use href="#i-x"/></svg></button>
+          </div>
+        </div>
+      </section>
 
-    <details class="side-more keys">
-      <summary><svg class="i"><use href="#i-keyboard"/></svg>Клавиши</summary>
-      <div><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> навигация</div>
-      <div><kbd>Enter</kbd> открыть · <kbd>Esc</kbd> закрыть</div>
-      <div>В просмотре: <kbd>←</kbd><kbd>→</kbd> листать, <kbd>↑</kbd> оставить, <kbd>↓</kbd> удалить</div>
-      <div><kbd>P</kbd> оставить · <kbd>X</kbd>/<kbd>Del</kbd> удалить · <kbd>U</kbd> снять</div>
-      <div><kbd>S</kbd> разобрать серию · <kbd>C</kbd> сравнить выбранные</div>
-      <div><kbd>Ctrl+A</kbd> выбрать всё · <kbd>Ctrl+Z</kbd> отменить</div>
-    </details>
+      <section class="sb-group" data-group="period">
+        <button class="sb-head" data-act="fold-group" data-fold-group="period">Период<span class="sb-val" id="periodVal"></span><i class="chev"></i></button>
+        <div class="sb-body">
+          <div id="periodChips" class="chips"></div>
+          <button id="calToggle" class="link small-link">Календарь</button>
+          <div id="calendar" class="cal hidden"></div>
+        </div>
+      </section>
+
+      <section class="sb-group" data-group="view">
+        <button class="sb-head" data-act="fold-group" data-fold-group="view">Вид<i class="chev"></i></button>
+        <div class="sb-body">
+          <div id="granSeg" class="seg" title="Группировка ленты — меняется вместе с масштабом">
+            <button data-g="day">Дни</button>
+            <button data-g="month">Месяцы</button>
+            <button data-g="year">Годы</button>
+          </div>
+          <label class="row" title="Ctrl + колесо мыши или «щипок» на тачпаде">В ряду <span class="range-val"><input type="range" id="colsRange" min="2" max="30" step="1"><span id="colsVal" class="mono"></span></span></label>
+          <label class="row">Порядок
+            <select id="sortOrder">
+              <option value="desc">Сначала новые</option>
+              <option value="asc">Сначала старые</option>
+              <option value="size">Сначала тяжёлые</option>
+            </select>
+          </label>
+          <label class="row switch-row">Сворачивать серии <input type="checkbox" id="collapseSeries" class="switch"></label>
+          <div class="fold-btns">
+            <button class="btn small ghost" data-act="fold-all" title="Свернуть все дни в ленте">Свернуть группы</button>
+            <button class="btn small ghost" data-act="unfold-all" title="Развернуть все дни в ленте">Развернуть</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="sb-foot">
+      <details class="sb-pop">
+        <summary title="Как программа находит серии похожих кадров"><svg class="i"><use href="#i-sliders"/></svg>Серии</summary>
+        <div class="pop-card">
+          <h5>Поиск серий</h5>
+          <label class="row">Пауза между кадрами, с <input type="number" id="setGap" min="1" max="600" step="1"></label>
+          <label class="row">Похожесть <span class="range-val"><input type="range" id="setDist" min="6" max="32" step="1"><span id="setDistVal" class="mono"></span></span></label>
+          <label class="row">Оставлять из серии
+            <select id="setKeep">
+              <option value="auto">авто (1–2)</option>
+              <option value="1">1 кадр</option>
+              <option value="2">2 кадра</option>
+              <option value="3">3 кадра</option>
+            </select>
+          </label>
+          <button id="btnRegroup" class="btn small wide">Пересчитать</button>
+        </div>
+      </details>
+      <details class="sb-pop keys">
+        <summary title="Горячие клавиши"><svg class="i"><use href="#i-keyboard"/></svg>Клавиши</summary>
+        <div class="pop-card">
+          <h5>Клавиши</h5>
+          <div><kbd>/</kbd> поиск · <kbd>Ctrl</kbd> + колесо — масштаб ленты</div>
+          <div><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> навигация · <kbd>Enter</kbd> открыть · <kbd>Esc</kbd> закрыть</div>
+          <div>В просмотре: <kbd>←</kbd><kbd>→</kbd> листать, <kbd>↑</kbd> оставить, <kbd>↓</kbd> удалить</div>
+          <div><kbd>P</kbd> оставить · <kbd>X</kbd>/<kbd>Del</kbd> удалить · <kbd>U</kbd> снять</div>
+          <div><kbd>S</kbd> разобрать серию · <kbd>C</kbd> сравнить выбранные</div>
+          <div><kbd>Ctrl+A</kbd> выбрать всё · <kbd>Ctrl+Z</kbd> отменить</div>
+        </div>
+      </details>
+    </div>
   </aside>
 
   <main id="main">

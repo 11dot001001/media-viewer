@@ -108,7 +108,9 @@ const prefs = {
 // ============================================================ состояние
 const S = {
   root: null, items: [], byId: new Map(), series: new Map(), dups: new Map(),
-  view: 'grid', cats: new Set(prefs.get('cats', Object.keys(CATS))), status: 'all', from: '', to: '',
+  view: 'grid', types: new Set(prefs.get('types', [])), status: 'all', from: '', to: '',
+  sbFolded: new Set(prefs.get('sbFolded', [])),  // свёрнутые группы левой панели
+  aiMore: false,  // «Что на снимке»: показаны все категории, а не только частые
   sort: prefs.get('sort', 'desc'), collapse: prefs.get('collapse', false), cols: prefs.get('cols', 6),
   onlyOpen: prefs.get('onlyOpen', true),
   folded: new Set(prefs.get('folded', [])),  // свёрнутые дни / группы ленты
@@ -262,13 +264,13 @@ async function loadItems() {
 }
 
 // ============================================================ фильтры
-function passFilters(it, useStatus = true) {
-  if (!S.cats.has(it.c)) return false;
+function passFilters(it, useStatus = true, useDates = true) {
+  if (S.types.size && !S.types.has(it.c)) return false;
   if (S.aiSel.size && ![...S.aiSel].some(k => aiMatch(it, k))) return false;
   if (S.search && !S.search.rank.has(it.id)) return false;
   if (S.match && (it.m || 'new') !== S.match) return false;
   if (useStatus && S.status !== 'all' && it.st !== +S.status) return false;
-  if (S.from || S.to) {
+  if (useDates && (S.from || S.to)) {
     const k = dayKey(it.t);
     if (S.from && k < S.from) return false;
     if (S.to && k > S.to) return false;
@@ -340,7 +342,6 @@ function updateCounts() {
   $('#trashCount').textContent = tr;
   $('#btnTrashTop').classList.toggle('has-items', tr > 0);
   $('#btnUndo').disabled = !S.undo.length;
-  $('#dateReset').classList.toggle('hidden', !S.from && !S.to);
   updateSelInfo();
   updateFolderStats();
 }
@@ -383,6 +384,12 @@ function aiLabels() {
   return [...S.ai.labels.map((l, i) => ({ ...l, color: AI_COLORS[i % AI_COLORS.length] })), AI_OTHER];
 }
 
+const AI_TOP = 6;  // «Что на снимке»: сколько частых категорий видно сразу, остальные — по «ещё»
+const MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+
+const chipHTML = (key, attr, label, color, n, active, title = '') =>
+  `<button class="chip${active ? ' active' : ''}" ${attr}="${key}" title="${esc(title)}">${color ? `<span class="dot" style="background:${color}"></span>` : ''}${label}${n != null ? `<span class="cnt">${n}</span>` : ''}</button>`;
+
 function renderAiSide() {
   const counts = {};
   let rated = false;
@@ -391,25 +398,233 @@ function renderAiSide() {
     if (it.qf != null || it.qa != null) rated = true;
     for (const q of QUALITY_CATS) if (q.test(it)) counts[q.key] = (counts[q.key] || 0) + 1;
   }
-  const any = Object.keys(counts).length > 0 || rated;
+  const labels = aiLabels().filter(l => counts[l.key]).sort((a, b) => counts[b.key] - counts[a.key]);
+  const any = labels.length > 0 || rated;
   $('#aiSec').classList.toggle('hidden', !any);
-  $('#aiReset').classList.toggle('hidden', !S.aiSel.size && !S.search);
   if (!any) return;
-  const row = (l, title) => `<div class="cat ${S.aiSel.has(l.key) ? 'active' : ''}" data-ai="${l.key}" title="${title}">
-       <span class="dot" style="background:${l.color}"></span>${l.label}<span class="cnt">${counts[l.key] || ''}</span></div>`;
+  // частые сверху; выбранные видны всегда, даже если они не из частых
+  const shown = S.aiMore ? labels : labels.filter((l, i) => i < AI_TOP || S.aiSel.has(l.key));
+  const hidden = labels.length - shown.length;
+  $('#aiCats').innerHTML = shown.map(l => chipHTML(l.key, 'data-ai', l.label, l.color, counts[l.key], S.aiSel.has(l.key), 'Клик — показать только их, можно выбрать несколько')).join('') +
+    (hidden ? `<button class="chip more" data-ai-more>ещё ${hidden}</button>` : S.aiMore && labels.length > AI_TOP ? '<button class="chip more" data-ai-more>свернуть</button>' : '');
   const quality = QUALITY_CATS.filter(q => counts[q.key]);
-  $('#aiCats').innerHTML = aiLabels().filter(l => counts[l.key]).map(l => row(l, 'Клик — показать только их (можно выбрать несколько)')).join('') +
-    (quality.length ? '<div class="cats-sep">Оценка кадра</div>' + quality.map(q => row(q, q.hint + '. Клик — показать только их')).join('') : '');
+  $('#qCats').innerHTML = quality.length ? '<span class="chips-label">Оценка кадра</span>' +
+    quality.map(q => chipHTML(q.key, 'data-ai', q.label, q.color, counts[q.key], S.aiSel.has(q.key), q.hint)).join('') : '';
+  const sel = [...S.aiSel].map(k => aiLabels().find(l => l.key === k)?.label || QUALITY_CATS.find(q => q.key === k)?.label).filter(Boolean);
+  $('#aiVal').textContent = sel.length === 1 ? sel[0] : sel.length ? `выбрано ${sel.length}` : '';
+}
+
+/** Год и месяц по дате снимка (время в индексе — «настенное», как в EXIF, поэтому UTC). */
+const ym = t => { const d = new Date(t * 1000); return [d.getUTCFullYear(), d.getUTCMonth()]; };
+const pad2 = n => String(n).padStart(2, '0');
+const monthRange = (y, m) => [`${y}-${pad2(m + 1)}-01`, `${y}-${pad2(m + 1)}-${pad2(new Date(Date.UTC(y, m + 1, 0)).getUTCDate())}`];
+
+/** Какой год / месяц / день сейчас выбран быстрыми кнопками (null — свои даты или весь период). */
+function periodPick() {
+  if (!S.from || !S.to) return null;
+  const y = +S.from.slice(0, 4), m = +S.from.slice(5, 7) - 1;
+  if (S.from === `${y}-01-01` && S.to === `${y}-12-31`) return { y, m: null, d: null };
+  if (S.from === S.to) return { y, m, d: +S.from.slice(8, 10) };
+  const [a, b] = monthRange(y, m);
+  return S.from === a && S.to === b ? { y, m, d: null } : null;
+}
+
+/** Быстрые кнопки периода: годы → месяцы выбранного года. Дни и произвольный период — в календаре под ними.
+ *  Уровень, где выбирать не из чего (один год, один месяц), пропускается. */
+function renderPeriod() {
+  const tree = new Map();  // год → месяц → множество дней, где есть снимки
+  for (const it of S.items) {
+    if (it.t == null) continue;
+    const d = new Date(it.t * 1000);
+    const y = d.getUTCFullYear(), m = d.getUTCMonth();
+    const months = tree.get(y) || tree.set(y, new Map()).get(y);
+    (months.get(m) || months.set(m, new Set()).get(m)).add(d.getUTCDate());
+  }
+  const pick = periodPick();
+  const ys = [...tree.keys()].sort((a, b) => b - a);
+  const year = pick?.y ?? (ys.length === 1 ? ys[0] : null);
+  const months = year != null ? tree.get(year) : null;
+  let html = ys.length > 1 ? ys.map(y => chipHTML(y, 'data-year', y, null, null, pick?.y === y && pick.m == null)).join('') : '';
+  if (months?.size > 1) {
+    html += `<div class="chips months">${[...months.keys()].sort((a, b) => a - b).map(m =>
+      chipHTML(`${year}-${m}`, 'data-month', MONTHS[m], null, null, pick?.y === year && pick.m === m && pick.d == null)).join('')}</div>`;
+  }
+  $('#periodChips').innerHTML = html;
+  // Календарь открыт, если кнопок нет (поездка за один месяц) или выбраны дни, а не год / месяц целиком
+  const custom = (S.from || S.to) && (!pick || pick.d);
+  CAL.auto = !html || custom;
+  $('#periodVal').textContent = pick && !pick.d ? (pick.m == null ? String(pick.y) : `${MONTHS[pick.m]} ${pick.y}`)
+    : S.from || S.to ? rangeText(S.from, S.to) : '';
+  renderCalendar();
+}
+
+// ============================================================ календарь периода
+// Дни со снимками подсвечены (чем больше снимков, тем ярче). Период — двумя кликами: начало и конец.
+// mode: days — дни месяца, months — месяцы года (клик по заголовку), years — все годы со снимками
+const CAL = { open: prefs.get('calOpen', false), auto: false, mode: 'days', month: null, year: null, anchor: null, counts: new Map() };
+const MONTHS_FULL = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+const MONTHS_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const WEEKDAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+
+/** «15–20 мар 2026», «28 фев – 3 мар 2026», «20 мар 2026». */
+function rangeText(a, b) {
+  const p = k => (k ? { y: +k.slice(0, 4), m: +k.slice(5, 7) - 1, d: +k.slice(8, 10) } : null);
+  const x = p(a), y = p(b);
+  if (!x || !y) return x ? `с ${x.d} ${MONTHS[x.m]} ${x.y}` : `по ${y.d} ${MONTHS[y.m]} ${y.y}`;
+  if (a === b) return `${x.d} ${MONTHS[x.m]} ${x.y}`;
+  if (x.y === y.y && x.m === y.m) return `${x.d}–${y.d} ${MONTHS[x.m]} ${x.y}`;
+  if (x.y === y.y) return `${x.d} ${MONTHS[x.m]} – ${y.d} ${MONTHS[y.m]} ${x.y}`;
+  return `${x.d} ${MONTHS[x.m]} ${x.y} – ${y.d} ${MONTHS[y.m]} ${y.y}`;
+}
+
+function renderCalendar() {
+  const el = $('#calendar');
+  const open = CAL.open || CAL.auto;
+  el.classList.toggle('hidden', !open);
+  $('#calToggle').classList.toggle('hidden', CAL.auto);
+  $('#calToggle').textContent = CAL.open ? 'Скрыть календарь' : 'Календарь';
+  if (!open) return;
+  // Снимки по дням — с учётом остальных фильтров, но без периода: видно, где искать
+  const counts = CAL.counts = new Map();
+  for (const it of S.items) if (it.t != null && passFilters(it, true, false)) {
+    const k = dayKey(it.t);
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const keys = [...counts.keys()].sort();
+  if (!keys.length) { el.innerHTML = '<div class="cal-empty">Нет снимков с датой</div>'; return; }
+  const first = keys[0].slice(0, 7), last = keys[keys.length - 1].slice(0, 7);
+  if (!CAL.month || CAL.month < first || CAL.month > last) CAL.month = (S.to || S.from || keys[keys.length - 1]).slice(0, 7);
+  if (CAL.month < first) CAL.month = first;
+  if (CAL.month > last) CAL.month = last;
+  const bounds = { first, last, y0: +first.slice(0, 4), y1: +last.slice(0, 4) };
+  const sum = prefix => keys.filter(k => k.startsWith(prefix)).reduce((s, k) => s + counts.get(k), 0);
+  const body = CAL.mode === 'years' ? calYears(bounds, sum) : CAL.mode === 'months' ? calMonths(bounds, sum) : calDays(bounds, counts);
+
+  const sel = S.from || S.to;
+  const inRange = keys.filter(k => (!S.from || k >= S.from) && (!S.to || k <= S.to)).reduce((s, k) => s + counts.get(k), 0);
+  const [my, mm] = [+CAL.month.slice(0, 4), +CAL.month.slice(5, 7) - 1];
+  const wholeMonth = monthRange(my, mm);
+  const monthLink = CAL.mode === 'days' && !(S.from === wholeMonth[0] && S.to === wholeMonth[1])
+    ? `<button class="link" data-cal-month title="Выбрать ${MONTHS_FULL[mm].toLowerCase()} целиком">весь месяц</button>` : '';
+  const foot = CAL.anchor
+    ? `<span class="cal-hint">${CAL.mode === 'days' ? 'Теперь выберите последний день' : 'Найдите последний день'}</span><button class="link" data-cal-cancel>Отмена</button>`
+    : sel ? `<span><b>${rangeText(S.from, S.to)}</b> · ${plural(inRange, 'снимок', 'снимка', 'снимков')}</span>${monthLink}<button class="link" data-cal-clear>Сбросить</button>`
+      : `<span class="cal-hint">${CAL.mode === 'days' ? 'Клик — начало, второй — конец' : CAL.mode === 'months' ? 'Выберите месяц' : 'Выберите год'}</span>${monthLink}`;
+  el.innerHTML = `${body}<div class="cal-foot">${foot}</div>`;
+  if (CAL.mode === 'days') paintRange();
+}
+
+function calHead(prev, title, next, zoom, titleHint) {
+  const nav = (dir, ok, hint) => `<button class="cal-nav" data-cal-nav="${dir}" ${ok ? '' : 'disabled'} title="${hint}"><svg class="i"><use href="#i-${dir < 0 ? 'left' : 'right'}"/></svg></button>`;
+  return `<div class="cal-head">${prev ? nav(-1, prev.ok, prev.hint) : '<span class="cal-nav-gap"></span>'}
+    <button class="cal-title${zoom ? ' zoom' : ''}" ${zoom ? 'data-cal-zoom' : 'disabled'} title="${titleHint || ''}">${title}</button>
+    ${next ? nav(1, next.ok, next.hint) : '<span class="cal-nav-gap"></span>'}</div>`;
+}
+
+const heat = (n, max) => (n ? ' has l' + (1 + Math.min(3, Math.floor((n / max) * 4))) : '');  // яркость: 1–4
+
+/** Пересекается ли отрезок [a, b] (даты «гггг-мм-дд») с выбранным периодом или с начатым выбором. */
+function inSelection(a, b) {
+  const from = CAL.anchor || S.from, to = CAL.anchor || S.to;
+  if (!from && !to) return false;
+  return (!from || b >= from) && (!to || a <= to);
+}
+
+function calDays({ first, last, y0, y1 }, counts) {
+  const y = +CAL.month.slice(0, 4), m = +CAL.month.slice(5, 7) - 1;
+  const days = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const lead = (new Date(Date.UTC(y, m, 1)).getUTCDay() + 6) % 7;  // неделя с понедельника
+  let max = 1;
+  for (let d = 1; d <= days; d++) max = Math.max(max, counts.get(`${CAL.month}-${pad2(d)}`) || 0);
+  let cells = WEEKDAYS.map(w => `<span class="cal-wd">${w}</span>`).join('') + '<span></span>'.repeat(lead);
+  for (let d = 1; d <= days; d++) {
+    const k = `${CAL.month}-${pad2(d)}`, n = counts.get(k) || 0;
+    cells += `<button class="cal-day${heat(n, max)}" data-cal-day="${k}" title="${d} ${MONTHS_GEN[m]} ${y}${n ? ' · ' + plural(n, 'снимок', 'снимка', 'снимков') : ' · снимков нет'}">${d}</button>`;
+  }
+  return calHead({ ok: CAL.month > first, hint: 'Предыдущий месяц' }, `${MONTHS_FULL[m]} ${y}`,
+    { ok: CAL.month < last, hint: 'Следующий месяц' }, true, 'Выбрать другой месяц или год') +
+    `<div class="cal-grid">${cells}</div>`;
+}
+
+function calMonths({ first, last, y0, y1 }, sum) {
+  const y = CAL.year;
+  const n = Array.from({ length: 12 }, (_, m) => sum(`${y}-${pad2(m + 1)}`));
+  const max = Math.max(1, ...n);
+  const cells = n.map((c, m) => {
+    const k = `${y}-${pad2(m + 1)}`, [a, b] = monthRange(y, m);
+    const off = k < first || k > last;
+    return `<button class="cal-cell${heat(c, max)}${inSelection(a, b) ? ' in' : ''}${k === CAL.month ? ' cur' : ''}" data-cal-open-month="${k}" ${off ? 'disabled' : ''}
+      title="${MONTHS_FULL[m]} ${y}${c ? ' · ' + plural(c, 'снимок', 'снимка', 'снимков') : ' · снимков нет'}">${MONTHS[m]}<small>${c || ''}</small></button>`;
+  }).join('');
+  return calHead({ ok: y > y0, hint: 'Предыдущий год' }, String(y), { ok: y < y1, hint: 'Следующий год' }, y1 > y0, 'Выбрать год') +
+    `<div class="cal-cells">${cells}</div>`;
+}
+
+function calYears({ y0, y1 }, sum) {
+  const ys = Array.from({ length: y1 - y0 + 1 }, (_, i) => y0 + i);
+  const n = ys.map(y => sum(String(y)));
+  const max = Math.max(1, ...n);
+  const cells = ys.map((y, i) => `<button class="cal-cell${heat(n[i], max)}${inSelection(`${y}-01-01`, `${y}-12-31`) ? ' in' : ''}${y === CAL.year ? ' cur' : ''}" data-cal-open-year="${y}"
+      title="${y}${n[i] ? ' · ' + plural(n[i], 'снимок', 'снимка', 'снимков') : ' · снимков нет'}">${y}<small>${n[i] || ''}</small></button>`).join('');
+  return calHead(null, y0 === y1 ? String(y0) : `${y0} – ${y1}`, null, false) + `<div class="cal-cells">${cells}</div>`;
+}
+
+/** Подсветка периода: выбранного, или от первого клика до дня под курсором. */
+function paintRange(hover) {
+  let a = S.from, b = S.to;
+  if (CAL.anchor) [a, b] = hover && hover < CAL.anchor ? [hover, CAL.anchor] : [CAL.anchor, hover || CAL.anchor];
+  for (const c of $$('#calendar .cal-day')) {
+    const k = c.dataset.calDay;
+    const on = (a || b) && (!a || k >= a) && (!b || k <= b);
+    c.classList.toggle('in', !!on);
+    c.classList.toggle('start', !!on && k === a);
+    c.classList.toggle('end', !!on && k === b);
+    c.classList.toggle('preview', !!CAL.anchor && !!on);
+  }
+}
+
+function calShift(dir) {
+  if (CAL.mode === 'months') {
+    CAL.year += dir;
+  } else {
+    const y = +CAL.month.slice(0, 4), m = +CAL.month.slice(5, 7) - 1 + dir;
+    const d = new Date(Date.UTC(y, m, 1));
+    CAL.month = `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}`;
+  }
+  renderCalendar();
+}
+
+/** Сколько фильтров включено — для заголовка «Фильтры» и кнопки «Сбросить». */
+function renderFilterSummary() {
+  const n = (S.types.size ? 1 : 0) + (S.aiSel.size ? 1 : 0) + (S.status !== 'all' ? 1 : 0) + (S.from || S.to ? 1 : 0)
+    + (S.search ? 1 : 0) + (S.match ? 1 : 0);
+  $('#fltCount').textContent = n;
+  $('#fltCount').classList.toggle('hidden', !n);
+  $('#fltReset').classList.toggle('hidden', !n);
+  $('#typeVal').textContent = S.types.size === 1 ? CATS[[...S.types][0]].label : S.types.size ? `выбрано ${S.types.size}` : '';
+  $$('#statusFilter button').forEach(b => b.classList.toggle('active', b.dataset.v === S.status));
+  $$('.sb-group').forEach(g => g.classList.toggle('folded', S.sbFolded.has(g.dataset.group)));
+  const semantic = S.items.some(i => i.ai);
+  $('#aiQuery').placeholder = semantic ? 'Поиск по смыслу и имени' : 'Поиск по имени файла';
+  $('#aiQuery').title = (semantic ? 'Например: море, рамен, ночной город, чек или IMG_1234. ' : 'Часть имени файла, например IMG_1234. ') + 'Enter — искать, Esc — сбросить';
+}
+
+function resetFilters() {
+  S.types.clear(); S.aiSel.clear(); S.status = 'all'; S.from = S.to = ''; S.match = null; S.search = null;
+  CAL.anchor = null;
+  $('#aiQuery').value = '';
+  filtersChanged();
 }
 
 function renderCats() {
   renderMatch();
   renderAiSide();
+  renderPeriod();
   const counts = {};
   for (const it of S.items) counts[it.c] = (counts[it.c] || 0) + 1;
-  $('#cats').innerHTML = Object.entries(CATS).map(([k, c]) =>
-    `<div class="cat ${S.cats.has(k) ? '' : 'off'}" data-cat="${k}" title="Клик — вкл/выкл, двойной клик — только эта категория">
-       <span class="dot" style="background:${c.color}"></span>${c.label}<span class="cnt">${counts[k] || ''}</span></div>`).join('');
+  $('#cats').innerHTML = Object.entries(CATS).filter(([k]) => counts[k] || S.types.has(k)).map(([k, c]) =>
+    chipHTML(k, 'data-cat', c.label, c.color, counts[k] || 0, S.types.has(k), 'Клик — показать только их, можно выбрать несколько')).join('');
+  renderFilterSummary();
 }
 
 // ============================================================ отрисовка
@@ -1436,6 +1651,13 @@ async function onAction(act, el) {
     case 'ai-analyze': aiCall('/api/ai/analyze'); break;
     case 'ai-stop': aiCall('/api/ai/stop'); break;
     case 'ai-cat': S.aiSel = new Set([el.dataset.key]); S.search = null; $('#aiQuery').value = ''; S.view = 'grid'; filtersChanged(); break;
+    case 'fold-group': {
+      const g = el.dataset.foldGroup;
+      if (S.sbFolded.has(g)) S.sbFolded.delete(g); else S.sbFolded.add(g);
+      prefs.set('sbFolded', [...S.sbFolded]);
+      el.closest('.sb-group').classList.toggle('folded', S.sbFolded.has(g));
+      break;
+    }
     case 'ph-filter': S.phoneFilter = el.dataset.v; S.selected.clear(); S.focus = null; render(); break;
     default: break;
   }
@@ -1750,14 +1972,29 @@ async function aiPoll() {
   if (running || S.view === 'ai') aiTimer = setTimeout(aiPoll, running ? 800 : 3000);
 }
 
-async function aiSearch(q) {
+// Запрос похож на имя файла (цифры, IMG_1234, DSC…): по смыслу такое не ищем, иначе в выдаче сотни случайных снимков
+const FILE_QUERY = /^[\d\s._-]+$|^(img|dsc|dscn|pxl|mvimg|vid|photo|video|screenshot)[\s_-]?\d/i;
+
+/** Поиск: сначала совпадения по имени файла, затем (если папка проанализирована) — по описанию того, что на снимке. */
+async function runSearch(q) {
+  const seq = runSearch.seq = (runSearch.seq || 0) + 1;  // ответ на устаревший запрос не применяем
+  $('#aiSearch').classList.remove('busy');
   q = q.trim();
   if (!q) { S.search = null; filtersChanged(); return; }
-  try {
-    const r = await api('/api/ai/search', { q });
-    S.search = { q, rank: new Map(r.hits.map(([id], i) => [id, i])) };
-    if (!r.hits.length) toast('Ничего похожего не нашлось');
-  } catch (e) { toast(esc(e.message), true); return; }
+  const ql = q.toLowerCase();
+  const ids = S.items.filter(i => i.p.toLowerCase().includes(ql)).map(i => i.id);
+  if (S.items.some(i => i.ai) && !FILE_QUERY.test(q)) {
+    $('#aiSearch').classList.add('busy');  // первый запрос ждёт загрузки модели, это пара секунд
+    try {
+      const r = await api('/api/ai/search', { q });
+      ids.push(...r.hits.map(([id]) => id));
+    } catch (e) { toast(esc(e.message), true); }
+    if (seq === runSearch.seq) $('#aiSearch').classList.remove('busy');
+  }
+  if (seq !== runSearch.seq) return;
+  const uniq = [...new Set(ids)];
+  S.search = { q, rank: new Map(uniq.map((id, i) => [id, i])) };
+  if (!uniq.length) toast('Ничего не нашлось');
   S.view = 'grid';
   filtersChanged();
   $('#view-grid').scrollTop = 0;
@@ -1898,36 +2135,93 @@ function bindUI() {
   $('#btnUndo').onclick = undo;
 
   $('#views').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
+  const toggle = (set, k) => { if (set.has(k)) set.delete(k); else set.add(k); };
+  const toFeed = () => { if (!['grid', 'map'].includes(S.view)) S.view = 'grid'; };
   $('#cats').addEventListener('click', e => {
-    const c = e.target.closest('.cat'); if (!c) return;
-    const k = c.dataset.cat;
-    if (S.cats.has(k)) S.cats.delete(k); else S.cats.add(k);
+    const c = e.target.closest('[data-cat]'); if (!c) return;
+    toggle(S.types, c.dataset.cat);
+    toFeed();
     filtersChanged();
   });
-  $('#cats').addEventListener('dblclick', e => {
-    const c = e.target.closest('.cat'); if (!c) return;
-    S.cats = new Set([c.dataset.cat]);
-    filtersChanged();
-  });
-  $('#aiCats').addEventListener('click', e => {
+  const aiClick = e => {
+    if (e.target.closest('[data-ai-more]')) { S.aiMore = !S.aiMore; renderAiSide(); return; }
     const c = e.target.closest('[data-ai]'); if (!c) return;
-    const k = c.dataset.ai;
-    if (S.aiSel.has(k)) S.aiSel.delete(k); else S.aiSel.add(k);
-    if (!['grid', 'map'].includes(S.view)) S.view = 'grid';
+    toggle(S.aiSel, c.dataset.ai);
+    toFeed();
     filtersChanged();
-  });
-  $('#aiSearch').addEventListener('submit', e => { e.preventDefault(); aiSearch($('#aiQuery').value); });
-  $('#aiQuery').addEventListener('keydown', e => { if (e.key === 'Escape') { $('#aiQuery').value = ''; aiSearch(''); } });
-  $('#aiReset').onclick = () => { S.aiSel.clear(); $('#aiQuery').value = ''; aiSearch(''); };
+  };
+  $('#aiCats').addEventListener('click', aiClick);
+  $('#qCats').addEventListener('click', aiClick);
+  $('#aiSearch').addEventListener('submit', e => { e.preventDefault(); runSearch($('#aiQuery').value); });
+  $('#aiQuery').addEventListener('keydown', e => { if (e.key === 'Escape') { $('#aiQuery').value = ''; runSearch(''); $('#aiQuery').blur(); } });
+  $('#aiQuery').addEventListener('search', e => { if (!e.target.value) runSearch(''); });  // крестик в поле
+  $('#fltReset').onclick = resetFilters;
   $('#statusFilter').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
     S.status = b.dataset.v;
-    $$('#statusFilter button').forEach(x => x.classList.toggle('active', x === b));
     filtersChanged();
   });
-  $('#dateFrom').onchange = e => { S.from = e.target.value; filtersChanged(); };
-  $('#dateTo').onchange = e => { S.to = e.target.value; filtersChanged(); };
-  $('#dateReset').onclick = () => { S.from = S.to = ''; $('#dateFrom').value = $('#dateTo').value = ''; filtersChanged(); };
+  $('#periodChips').addEventListener('click', e => {
+    const pick = periodPick();
+    const yb = e.target.closest('[data-year]'), mb = e.target.closest('[data-month]');
+    if (yb) {
+      const y = +yb.dataset.year;
+      [S.from, S.to] = pick?.y === y && pick.m == null ? ['', ''] : [`${y}-01-01`, `${y}-12-31`];
+    } else if (mb) {
+      const [y, m] = mb.dataset.month.split('-').map(Number);
+      // повторный клик по месяцу — обратно к году (или ко всему периоду, если год в папке один)
+      const multiYear = $$('#periodChips [data-year]').length > 0;
+      [S.from, S.to] = pick?.y === y && pick.m === m ? (multiYear ? [`${y}-01-01`, `${y}-12-31`] : ['', '']) : monthRange(y, m);
+      CAL.month = `${y}-${pad2(m + 1)}`;
+      CAL.mode = 'days';
+    } else return;
+    CAL.anchor = null;
+    toFeed();
+    filtersChanged();
+  });
+  $('#calToggle').onclick = () => { CAL.open = !CAL.open; prefs.set('calOpen', CAL.open); renderCalendar(); };
+  const cal = $('#calendar');
+  cal.addEventListener('click', e => {
+    const nav = e.target.closest('[data-cal-nav]');
+    if (nav) { calShift(+nav.dataset.calNav); return; }
+    if (e.target.closest('[data-cal-cancel]')) { CAL.anchor = null; renderCalendar(); return; }
+    if (e.target.closest('[data-cal-clear]')) { CAL.anchor = null; S.from = S.to = ''; filtersChanged(); return; }
+    if (e.target.closest('[data-cal-zoom]')) {
+      // «отдалить»: дни → месяцы года → годы
+      if (CAL.mode === 'days') { CAL.mode = 'months'; CAL.year = +CAL.month.slice(0, 4); } else CAL.mode = 'years';
+      renderCalendar();
+      return;
+    }
+    const oy = e.target.closest('[data-cal-open-year]');
+    if (oy) { CAL.year = +oy.dataset.calOpenYear; CAL.mode = 'months'; renderCalendar(); return; }
+    const om = e.target.closest('[data-cal-open-month]');
+    if (om) { CAL.month = om.dataset.calOpenMonth; CAL.mode = 'days'; renderCalendar(); return; }
+    if (e.target.closest('[data-cal-month]')) {
+      CAL.anchor = null;
+      [S.from, S.to] = monthRange(+CAL.month.slice(0, 4), +CAL.month.slice(5, 7) - 1);
+      toFeed();
+      filtersChanged();
+      return;
+    }
+    const day = e.target.closest('[data-cal-day]');
+    if (!day) return;
+    const k = day.dataset.calDay;
+    if (!CAL.anchor) {
+      // первый клик: сразу показываем этот день и ждём второй — конец периода
+      CAL.anchor = k;
+      S.from = S.to = k;
+    } else {
+      [S.from, S.to] = k < CAL.anchor ? [k, CAL.anchor] : [CAL.anchor, k];
+      CAL.anchor = null;
+    }
+    toFeed();
+    filtersChanged();
+  });
+  cal.addEventListener('mouseover', e => { const d = e.target.closest('[data-cal-day]'); if (d && CAL.anchor) paintRange(d.dataset.calDay); });
+  cal.addEventListener('mouseleave', () => { if (CAL.anchor) paintRange(); });
+  // всплывающие карточки внизу панели: открыта только одна, клик мимо — закрыть
+  $$('.sb-pop').forEach(d => d.addEventListener('toggle', () => { if (d.open) $$('.sb-pop').forEach(o => { if (o !== d) o.open = false; }); }));
+  document.addEventListener('mousedown', e => { if (!e.target.closest('.sb-pop')) $$('.sb-pop[open]').forEach(d => { d.open = false; }); });
   $('#colsRange').oninput = e => setCols(+e.target.value);
   $('#granSeg').addEventListener('click', e => {
     const b = e.target.closest('[data-g]');
@@ -2065,6 +2359,8 @@ function bindUI() {
     if (!$('#review').classList.contains('hidden')) { reviewKey(e); return; }
     if (!$('#welcome').classList.contains('hidden')) { if (e.key === 'Escape' && S.root) showWelcome(false); return; }
     if (S.view === 'ai') return;
+    if (e.key === 'Escape' && CAL.anchor) { CAL.anchor = null; renderCalendar(); return; }
+    if (e.key === '/' && !e.ctrlKey && !e.altKey) { e.preventDefault(); $('#aiQuery').focus(); $('#aiQuery').select(); return; }
     gridKey(e);
   });
 }
@@ -2135,7 +2431,7 @@ function setCols(n, point) {
 }
 
 function filtersChanged() {
-  prefs.set('cats', [...S.cats]);
+  prefs.set('types', [...S.types]);
   mapDirty = true;
   renderCats();
   render();
