@@ -112,7 +112,7 @@ class SettingsReq(BaseModel):
 def index():
     # к ссылкам на app.js и style.css добавляем версию файла — браузер не возьмёт старую копию из кэша
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    for name in ("app.js", "style.css"):
+    for name in ("app.js", "stats.js", "style.css"):
         v = int((STATIC / name).stat().st_mtime)
         html = html.replace(f"/static/{name}\"", f"/static/{name}?v={v}\"")
     return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})

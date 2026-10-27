@@ -5,21 +5,27 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// emoji — в фишках фильтров вместо цветной точки: категорию видно с одного взгляда, а не по цвету.
+// Подобраны по виду на тёмном фоне в Windows: 👥, 🐾 и ❔ там почти не видны
 const CATS = {
-  photo: { label: 'Фото с камеры', color: '#4f9cf9' },
-  screenshot: { label: 'Скриншоты', color: '#f2b33d' },
-  video: { label: 'Видео', color: '#e86a9a' },
-  messenger: { label: 'Из мессенджеров', color: '#3fb871' },
-  other: { label: 'Прочее', color: '#8b929b' },
+  photo: { label: 'Фото с камеры', color: '#4f9cf9', emoji: '📷' },
+  screenshot: { label: 'Скриншоты', color: '#f2b33d', emoji: '📱' },
+  video: { label: 'Видео', color: '#e86a9a', emoji: '🎬' },
+  messenger: { label: 'Из мессенджеров', color: '#3fb871', emoji: '💬' },
+  other: { label: 'Прочее', color: '#8b929b', emoji: '🗂️' },
 };
 // Цвета смысловых категорий (страница «AI»): по порядку из /api/state, «не определено» — серое
 const AI_COLORS = ['#f59e8b', '#e0a458', '#f472b6', '#4ade80', '#60a5fa', '#94a3b8', '#facc15', '#22d3ee', '#c084fc', '#a8a29e'];
-const AI_OTHER = { key: 'other', label: 'Не определено', color: '#6b7280' };
+const AI_EMOJI = {
+  people: '🧑‍🤝‍🧑', animals: '🐱', food: '🍜', nature: '🌿', city: '🏙️', transport: '🚗',
+  docs: '🧾', screens: '💻', memes: '😂', junk: '🌀',
+};
+const AI_OTHER = { key: 'other', label: 'Не определено', color: '#6b7280', emoji: '🤷' };
 // Оценка кадра (страница «AI»): «лучшие» — красота кадра по SigLIP не ниже порога (≈ лучшие 7 % снимков из поездки)
 const AES_BEST = 0.25;
 const QUALITY_CATS = [
-  { key: 'q:closed', label: 'Закрыты глаза', color: '#fb7185', hint: 'У кого-то в кадре закрыты глаза', test: it => it.qc > 0 },
-  { key: 'q:best', label: 'Лучшие кадры', color: '#fbbf24', hint: 'Самые красивые снимки по оценке нейросети', test: it => it.qa >= AES_BEST },
+  { key: 'q:closed', label: 'Закрыты глаза', color: '#fb7185', emoji: '😴', hint: 'У кого-то в кадре закрыты глаза', test: it => it.qc > 0 },
+  { key: 'q:best', label: 'Лучшие кадры', color: '#fbbf24', emoji: '✨', hint: 'Самые красивые снимки по оценке нейросети', test: it => it.qa >= AES_BEST },
 ];
 const aiMatch = (it, k) => { const q = QUALITY_CATS.find(c => c.key === k); return q ? q.test(it) : it.ai === k; };
 const PHONE_ICON = '<svg class="i"><use href="#i-phone"/></svg>';
@@ -381,14 +387,16 @@ function renderMatch() {
 }
 
 function aiLabels() {
-  return [...S.ai.labels.map((l, i) => ({ ...l, color: AI_COLORS[i % AI_COLORS.length] })), AI_OTHER];
+  return [...S.ai.labels.map((l, i) => ({ ...l, color: AI_COLORS[i % AI_COLORS.length], emoji: AI_EMOJI[l.key] })), AI_OTHER];
 }
 
 const AI_TOP = 6;  // «Что на снимке»: сколько частых категорий видно сразу, остальные — по «ещё»
 const MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 
-const chipHTML = (key, attr, label, color, n, active, title = '') =>
-  `<button class="chip${active ? ' active' : ''}" ${attr}="${key}" title="${esc(title)}">${color ? `<span class="dot" style="background:${color}"></span>` : ''}${label}${n != null ? `<span class="cnt">${n}</span>` : ''}</button>`;
+/** Значок категории: эмодзи, а если его нет — цветная точка. mark — категория с полями emoji / color (или null). */
+const markHTML = m => (m?.emoji ? `<span class="emo">${m.emoji}</span>` : m?.color ? `<span class="dot" style="background:${m.color}"></span>` : '');
+const chipHTML = (key, attr, label, mark, n, active, title = '') =>
+  `<button class="chip${active ? ' active' : ''}" ${attr}="${key}" title="${esc(title)}">${markHTML(mark)}${label}${n != null ? `<span class="cnt">${n}</span>` : ''}</button>`;
 
 function renderAiSide() {
   const counts = {};
@@ -405,11 +413,11 @@ function renderAiSide() {
   // частые сверху; выбранные видны всегда, даже если они не из частых
   const shown = S.aiMore ? labels : labels.filter((l, i) => i < AI_TOP || S.aiSel.has(l.key));
   const hidden = labels.length - shown.length;
-  $('#aiCats').innerHTML = shown.map(l => chipHTML(l.key, 'data-ai', l.label, l.color, counts[l.key], S.aiSel.has(l.key), 'Клик — показать только их, можно выбрать несколько')).join('') +
+  $('#aiCats').innerHTML = shown.map(l => chipHTML(l.key, 'data-ai', l.label, l, counts[l.key], S.aiSel.has(l.key), 'Клик — показать только их, можно выбрать несколько')).join('') +
     (hidden ? `<button class="chip more" data-ai-more>ещё ${hidden}</button>` : S.aiMore && labels.length > AI_TOP ? '<button class="chip more" data-ai-more>свернуть</button>' : '');
   const quality = QUALITY_CATS.filter(q => counts[q.key]);
   $('#qCats').innerHTML = quality.length ? '<span class="chips-label">Оценка кадра</span>' +
-    quality.map(q => chipHTML(q.key, 'data-ai', q.label, q.color, counts[q.key], S.aiSel.has(q.key), q.hint)).join('') : '';
+    quality.map(q => chipHTML(q.key, 'data-ai', q.label, q, counts[q.key], S.aiSel.has(q.key), q.hint)).join('') : '';
   const sel = [...S.aiSel].map(k => aiLabels().find(l => l.key === k)?.label || QUALITY_CATS.find(q => q.key === k)?.label).filter(Boolean);
   $('#aiVal').textContent = sel.length === 1 ? sel[0] : sel.length ? `выбрано ${sel.length}` : '';
 }
@@ -623,7 +631,7 @@ function renderCats() {
   const counts = {};
   for (const it of S.items) counts[it.c] = (counts[it.c] || 0) + 1;
   $('#cats').innerHTML = Object.entries(CATS).filter(([k]) => counts[k] || S.types.has(k)).map(([k, c]) =>
-    chipHTML(k, 'data-cat', c.label, c.color, counts[k] || 0, S.types.has(k), 'Клик — показать только их, можно выбрать несколько')).join('');
+    chipHTML(k, 'data-cat', c.label, c, counts[k] || 0, S.types.has(k), 'Клик — показать только их, можно выбрать несколько')).join('');
   renderFilterSummary();
 }
 
@@ -633,6 +641,7 @@ function setView(v) {
   if (v === 'trash') S.stats = null;  // статистику перечитываем при каждом открытии корзины
   S.selected.clear();
   S.focus = null;
+  $('#stTip')?.classList.add('hidden');  // подсказка графика статистики
   render();
   $('#view-' + v).scrollTop = 0;
 }
@@ -644,7 +653,8 @@ function render() {
   // страница «AI» открывается и без папки: модель можно скачать заранее
   if (S.view === 'ai') { if (!S.root) showWelcome(false); renderAI(); return; }
   if (!S.root) { showWelcome(true); return; }
-  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash })[S.view]();
+  // stats.js подключается отдельным файлом после app.js — обращаемся к нему только при отрисовке
+  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats() })[S.view]();
 }
 
 function tileHTML(it, o = {}) {
@@ -1659,7 +1669,7 @@ async function onAction(act, el) {
       break;
     }
     case 'ph-filter': S.phoneFilter = el.dataset.v; S.selected.clear(); S.focus = null; render(); break;
-    default: break;
+    default: if (act.startsWith('st-')) statsAction(act, el); break;
   }
 }
 
@@ -2068,7 +2078,7 @@ function renderAI() {
     if (q.done) {
       rate += `<div class="ai-chips">${QUALITY_CATS.map(c => {
         const n = c.key === 'q:closed' ? q.closed : S.items.filter(c.test).length;
-        return n ? `<button class="ai-chip" data-act="q-cat" data-key="${c.key}"><span class="dot" style="background:${c.color}"></span>${c.label}<span class="cnt">${n}</span></button>` : '';
+        return n ? `<button class="ai-chip" data-act="q-cat" data-key="${c.key}">${markHTML(c)}${c.label}<span class="cnt">${n}</span></button>` : '';
       }).join('')}</div>`;
     }
   } else if (facesReady) rate = '<p class="muted">Откройте папку, чтобы оценить её снимки.</p>';
@@ -2076,7 +2086,7 @@ function renderAI() {
   // 3. Категории по смыслу
   const counts = a?.labels || {};
   const cats = aiLabels().filter(l => counts[l.key]).map(l =>
-    `<button class="ai-chip" data-act="ai-cat" data-key="${l.key}"><span class="dot" style="background:${l.color}"></span>${l.label}<span class="cnt">${counts[l.key]}</span></button>`).join('');
+    `<button class="ai-chip" data-act="ai-cat" data-key="${l.key}">${markHTML(l)}${l.label}<span class="cnt">${counts[l.key]}</span></button>`).join('');
 
   el.innerHTML = `<div class="list-head"><h2>AI</h2><span class="sub">Нейросеть работает на этом компьютере: снимки никуда не отправляются</span></div>
     <div class="ai-grid">
@@ -2358,9 +2368,9 @@ function bindUI() {
     if (!$('#viewer').classList.contains('hidden')) { viewerKey(e); return; }
     if (!$('#review').classList.contains('hidden')) { reviewKey(e); return; }
     if (!$('#welcome').classList.contains('hidden')) { if (e.key === 'Escape' && S.root) showWelcome(false); return; }
-    if (S.view === 'ai') return;
     if (e.key === 'Escape' && CAL.anchor) { CAL.anchor = null; renderCalendar(); return; }
     if (e.key === '/' && !e.ctrlKey && !e.altKey) { e.preventDefault(); $('#aiQuery').focus(); $('#aiQuery').select(); return; }
+    if (S.view === 'ai' || S.view === 'stats') return;  // на этих страницах нет ленты снимков
     gridKey(e);
   });
 }

@@ -208,6 +208,9 @@ input[type=checkbox], input[type=radio] { width: 15px; height: 15px; margin: 0; 
 }
 .chip:hover { background: var(--surface-3); color: var(--text); }
 .chip .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.emo { flex: none; font-size: 13px; line-height: 1; font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif; }
+.chip .emo { margin-left: -2px; }
+.chip:not(.active) .emo { filter: saturate(.85); }
 .chip .cnt { margin-left: 1px; font-size: 10.5px; }
 .chip.active { background: var(--accent-soft); border-color: rgba(124, 135, 255, .55); color: #fff; }
 .chip.active .cnt { color: #c7ccff; }
@@ -852,3 +855,102 @@ body.tiles-tiny #view-trash .ph-inset i { display: none; }
   padding: 3px 9px; border-radius: 20px; background: rgba(244, 63, 94, .9); color: #fff; font-size: 11.5px; font-weight: 600;
 }
 .eyes-tag svg.i { width: 13px; height: 13px; }
+
+/* ---------- страница «Статистика»
+   Цвета проверены скриптом dataviz на подложке карточек #121318: синий/оранжевый различимы при дальтонизме (ΔE 26.8),
+   шкала тепловой карты — один оттенок, яркость растёт ступенями. Текст графиков — только серые оттенки, не цвет серии. */
+:root {
+  --st-1: #3987e5; --st-2: #d95926; --st-other: #353a46; --st-grid: #22252d; --st-axis: #353a45;
+  --st-h0: #1b1e25; --st-h1: #184f95; --st-h2: #256abf; --st-h3: #3987e5; --st-h4: #86b6ef;
+}
+.st-note { color: var(--muted); font-size: 12px; }
+.st-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.st-tile { padding: 14px 16px; border-radius: 14px; background: var(--surface-1); border: 1px solid var(--line); }
+.st-tile.click { cursor: pointer; transition: border-color .15s, background .15s; }
+.st-tile.click:hover { border-color: rgba(124, 135, 255, .4); background: #15161c; }
+.st-l { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.st-v { margin-top: 4px; font-size: 26px; font-weight: 700; letter-spacing: -.02em; color: var(--text); }
+.st-s { margin-top: 2px; font-size: 12px; color: var(--text-2); }
+.st-card { padding: 16px 18px 14px; }
+.st-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.st-head h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.st-sub { color: var(--muted); font-size: 12px; }
+.st-mode { margin-left: auto; width: 250px; }
+.st-ctl { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.st-ctl-l { align-self: center; margin: 0 4px 0 2px; font-size: 12px; color: var(--muted); }
+.chip.active.cmp { background: rgba(217, 89, 38, .16); border-color: rgba(217, 89, 38, .55); }
+.st-insight { margin: 0 0 8px; color: var(--text-2); line-height: 1.55; }
+.st-insight b { color: var(--text); font-weight: 650; }
+.st-chart { width: 100%; overflow: hidden; }
+.st-chart svg { display: block; }
+.st-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-top: 6px; font-size: 12px; color: var(--text-2); }
+.st-legend .key { margin-left: 8px; }
+.st-legend .key:first-child { margin-left: 0; }
+.key { display: inline-block; flex: none; }
+.key.line { width: 14px; height: 2px; border-radius: 1px; vertical-align: middle; }
+.key.bar { width: 10px; height: 10px; border-radius: 3px; }
+.key.s1 { background: var(--st-1); }
+.key.s2 { background: var(--st-2); }
+.key.other { background: #5a6070; }
+.st-legend.heat { gap: 3px; justify-content: flex-end; color: var(--muted); font-size: 11px; }
+.st-legend.heat span { margin: 0 4px; }
+.st-legend.heat i { width: 11px; height: 11px; border-radius: 2.5px; }
+.hl0 { fill: var(--st-h0); background: var(--st-h0); }
+.hl1 { fill: var(--st-h1); background: var(--st-h1); }
+.hl2 { fill: var(--st-h2); background: var(--st-h2); }
+.hl3 { fill: var(--st-h3); background: var(--st-h3); }
+.hl4 { fill: var(--st-h4); background: var(--st-h4); }
+#stHeat rect[data-k] { cursor: pointer; }
+#stHeat rect.hl0 { cursor: default; }
+#stHeat rect[data-k]:hover { stroke: #e6e9ff; stroke-width: 1.5; }
+.st-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.st-row .card { margin-bottom: 12px; }
+.st-row:empty { display: none; }
+#stWeek { margin-top: 10px; }
+.st-table { margin-top: 10px; }
+.st-table summary { cursor: pointer; color: #a5adff; font-size: 12px; width: max-content; }
+.st-mtable { margin-top: 8px; font-size: 12px; }
+.st-mtable td, .st-mtable th { text-align: right; padding: 5px 6px; font-variant-numeric: tabular-nums; }
+.st-mtable td:first-child, .st-mtable th:first-child { text-align: left; }
+.st-facts ul { margin: 0; padding-left: 18px; color: var(--text-2); line-height: 1.8; }
+.st-facts b { color: var(--text); font-weight: 650; }
+.st-facts .link { font-size: inherit; }
+/* SVG: сетка и оси — волосяные линии, данные — тонкие линии и узкие столбцы */
+.st-grid { stroke: var(--st-grid); stroke-width: 1; }
+.st-grid.base { stroke: var(--st-axis); }
+.st-tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.st-tick.cur { fill: var(--text); font-weight: 650; }
+.st-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.st-line.s1 { stroke: var(--st-1); }
+.st-line.s2 { stroke: var(--st-2); }
+.st-line.other { stroke: var(--st-other); stroke-width: 1.5; }
+.st-area { fill: var(--st-1); opacity: .1; }
+.st-dot { stroke: var(--surface-1); stroke-width: 2; }
+.st-dot.s1 { fill: var(--st-1); }
+.st-dot.s2 { fill: var(--st-2); }
+.st-end { fill: var(--text-2); font-size: 11.5px; font-weight: 600; }
+.st-cap { fill: var(--text-2); font-size: 11px; font-weight: 600; }
+.st-cross { stroke: #5a6070; stroke-width: 1; }
+.st-cross.hidden { display: none; }
+.st-hit { fill: transparent; cursor: pointer; }
+.st-bar.s1 { fill: var(--st-1); }
+.st-bar.s2 { fill: var(--st-2); }
+.st-bar.soft { opacity: .55; }
+#stHours .st-hit, #stWeek .st-hit { cursor: default; }
+/* горизонтальные полосы: что на снимках, чем снимали */
+.st-hbars { display: flex; flex-direction: column; gap: 7px; }
+.st-hrow { display: grid; grid-template-columns: minmax(90px, 38%) 1fr auto; align-items: center; gap: 10px; font-size: 12.5px; }
+.st-hname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.st-htrack { height: 10px; }
+.st-htrack i { display: block; height: 100%; min-width: 3px; border-radius: 0 4px 4px 0; background: var(--st-1); }
+.st-hval { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* подсказка: значение крупно, подпись мельче; ключ серии — короткая линия */
+.st-tip {
+  position: fixed; z-index: 200; pointer-events: none; min-width: 120px; padding: 8px 11px; border-radius: 10px;
+  background: #1d2028; border: 1px solid var(--line-2); box-shadow: var(--shadow); font-size: 12px; color: var(--text-2);
+}
+.st-tip.hidden { display: none; }
+.st-tip div { display: flex; align-items: center; gap: 7px; line-height: 1.6; }
+.st-tip b { color: var(--text); font-size: 13px; }
+.st-tip-h { margin-bottom: 2px; color: var(--text); font-weight: 600; }
+.st-tip-f { margin-top: 3px; color: var(--muted); font-size: 11px; }

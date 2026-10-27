@@ -38,6 +38,7 @@
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></symbol>
   <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.14 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></symbol>
   <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="m2 2 20 20"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   <symbol id="i-keyboard" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01"/><path d="M10 8h.01"/><path d="M14 8h.01"/><path d="M18 8h.01"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/><path d="M7 16h10"/></symbol>
 </svg>
@@ -79,6 +80,7 @@
         <button data-view="series"><svg class="i"><use href="#i-layers"/></svg>Серии<span class="cnt" id="cnt-series"></span></button>
         <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
         <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
+        <button data-view="stats"><svg class="i"><use href="#i-chart"/></svg>Статистика<span class="cnt" id="cnt-stats"></span></button>
         <button data-view="trash"><svg class="i"><use href="#i-trash"/></svg>Корзина отбора<span class="cnt" id="cnt-trash"></span></button>
         <button data-view="ai"><svg class="i"><use href="#i-sparkles"/></svg>AI<span class="cnt" id="cnt-ai"></span></button>
       </nav>
@@ -220,6 +222,7 @@
     </div>
     <div id="view-trash" class="view hidden"></div>
     <div id="view-ai" class="view hidden"></div>
+    <div id="view-stats" class="view hidden"></div>
   </main>
 </div>
 
@@ -280,5 +283,6 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="/static/app.js"></script>
+<script src="/static/stats.js"></script>
 </body>
 </html>
