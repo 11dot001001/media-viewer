@@ -129,7 +129,8 @@ const S = {
   ai: { ready: false, labels: [] },  // нейросеть: установлена ли модель, список смысловых категорий
   aiInfo: null,  // состояние страницы «AI» (/api/ai)
   aiSel: new Set(),  // выбранные смысловые категории (пусто — без фильтра)
-  search: null,  // { q, rank: Map(id → место в выдаче) } — поиск по описанию
+  search: null,  // { q, rank: Map(id → место в выдаче), title? } — поиск по описанию или «похожие на…»
+  cleanOpen: new Set(),  // «Можно удалить»: развёрнутые группы
 };
 const MATCH = {
   deleted: { label: 'Удалены в облаке', color: '#ef5350', hint: 'Вы уже удалили их из облака — сразу помечены к удалению' },
@@ -310,7 +311,7 @@ function groupKey(it) {
   return g === 'day' ? d : g === 'month' ? 'm' + d.slice(0, 7) : 'y' + d.slice(0, 4);
 }
 function groupTitle(k) {
-  if (k === 'q') return `По запросу «${esc(S.search.q)}»`;
+  if (k === 'q') return S.search.title ? esc(S.search.title) : `По запросу «${esc(S.search.q)}»`;
   if (k.startsWith('sz')) return SIZE_BUCKETS[+k.slice(2)][1];
   if (k.startsWith('m')) return fmtMonthF.format(new Date(k.slice(1) + '-01T00:00:00Z')).replace(/\s*г\.$/, '');
   if (k.startsWith('y')) return k.slice(1);
@@ -343,6 +344,7 @@ function updateCounts() {
   set('series', new Set(base.filter(i => i.s).map(i => i.s)).size);
   set('dups', new Set(base.filter(i => i.d).map(i => i.d)).size);
   set('map', base.filter(i => i.lat != null).length);
+  set('clean', cleanSections().reduce((n, sec) => n + sec.items.length, 0));
   const tr = S.items.filter(i => i.st === 2).length;
   set('trash', tr);
   $('#trashCount').textContent = tr;
@@ -654,7 +656,7 @@ function render() {
   if (S.view === 'ai') { if (!S.root) showWelcome(false); renderAI(); return; }
   if (!S.root) { showWelcome(true); return; }
   // stats.js подключается отдельным файлом после app.js — обращаемся к нему только при отрисовке
-  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats() })[S.view]();
+  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats(), clean: renderClean })[S.view]();
 }
 
 function tileHTML(it, o = {}) {
@@ -1071,7 +1073,7 @@ async function applyStatuses(changes, { record = true, rerender = true } = {}) {
   }
   refreshTiles(changes.keys());
   updateCounts();
-  if (rerender && ['series', 'dups', 'trash'].includes(S.view)) rerenderKeepScroll();
+  if (rerender && ['series', 'dups', 'trash', 'clean'].includes(S.view)) rerenderKeepScroll();
   try {
     for (const [st, ids] of byStatus) await api('/api/status', { ids, status: st });
   } catch (e) {
@@ -1172,17 +1174,24 @@ function moveFocus(dir, extend) {
 function markAndAdvance(st) {
   const ids = targetIds();
   if (!ids.length) return;
+  // следующий запоминаем до отметки: на странице «Можно удалить» отмеченный снимок сразу пропадает из списка
+  const idx = ids.length === 1 ? S.list.findIndex(i => i.id === ids[0]) : -1;
+  const next = idx >= 0 ? S.list[idx + 1] : null;
   mark(ids, st);
-  if (ids.length === 1) {
-    const idx = S.list.findIndex(i => i.id === ids[0]);
-    if (idx >= 0 && idx < S.list.length - 1) moveFocus('right');
+  if (!next) return;
+  if (S.list.some(i => i.id === ids[0])) { moveFocus('right'); return; }
+  if (S.list.some(i => i.id === next.id)) {
+    S.selected = new Set([next.id]);
+    S.anchor = next.id;
+    setFocus(next.id);
+    refreshSelection();
   }
 }
 
 function gridKey(e) {
   const c = e.code;
   if ((e.ctrlKey || e.metaKey) && c === 'KeyZ') { e.preventDefault(); undo(); return; }
-  if (!['grid', 'trash'].includes(S.view)) return;
+  if (!['grid', 'trash', 'clean'].includes(S.view)) return;
   if ((e.ctrlKey || e.metaKey) && c === 'KeyA') {
     e.preventDefault();
     S.selected = new Set(S.list.map(i => i.id));
@@ -1202,6 +1211,7 @@ function gridKey(e) {
     case 'KeyP': markAndAdvance(1); break;
     case 'KeyU': markAndAdvance(0); break;
     case 'KeyS': if (it?.s) openSeries(it.s); break;
+    case 'KeyF': if (it) findSimilar(it); break;
     case 'KeyC': {
       const ids = [...S.selected];
       if (ids.length >= 2 && ids.length <= 9) openCompare(ids);
@@ -1436,6 +1446,7 @@ function viewerKey(e) {
     case 'KeyI': V.info = !V.info; $('#vInfo').classList.toggle('hidden', !V.info); if (V.info) loadInfo(V.list[V.idx]); break;
     case 'KeyZ': vZoom(); break;
     case 'KeyS': { const it = V.list[V.idx]; if (it?.s && $('#review').classList.contains('hidden')) { closeViewer(); openSeries(it.s); } break; }
+    case 'KeyF': { const it = V.list[V.idx]; if (it) { closeViewer(); findSimilar(it); } break; }
     case 'Space': if (!$('#vMedia video')) { e.preventDefault(); vStep(1); } break;
     default: break;
   }
@@ -1609,6 +1620,10 @@ async function onAction(act, el) {
     case 'reject': if (el.closest('#viewer')) vMark(2); else mark([id], 2); break;
     case 'info': V.info = !V.info; $('#vInfo').classList.toggle('hidden', !V.info); if (V.info) loadInfo(V.list[V.idx]); break;
     case 'series': { const it = V.list[V.idx]; if (it?.s) { closeViewer(); openSeries(it.s); } break; }
+    case 'similar': { const it = V.list[V.idx]; closeViewer(); findSimilar(it); break; }
+    case 'clean-mark': cleanMark(cleanSections().filter(x => !el.dataset.sec || x.key === el.dataset.sec)); break;
+    case 'clean-more': if (S.cleanOpen.has(el.dataset.sec)) S.cleanOpen.delete(el.dataset.sec); else S.cleanOpen.add(el.dataset.sec); rerenderKeepScroll(); break;
+    case 'go-ai': setView('ai'); break;
     case 'reveal': api('/api/reveal/' + V.list[V.idx].id, {}); break;
     case 'external': api('/api/open-external/' + V.list[V.idx].id, {}); break;
     case 'onmap': { const it = V.list[V.idx]; closeViewer(); S.mapTarget = [it.lat, it.lon]; mapDirty = true; setView('map'); break; }
@@ -1940,6 +1955,83 @@ async function openFolder(path) {
   } catch (e) { toast(esc(e.message), true); }
 }
 
+// ============================================================ «Можно удалить»
+// Подсказки по неразобранным снимкам. Каждый снимок — только в первой подходящей группе, порядок — от самых
+// очевидных к тем, что стоит проверить глазами. Ничего не удаляется: «Отметить» кладёт в «Корзину отбора».
+const YEAR = 365 * 864e2;
+const CLEAN = [
+  { key: 'junk', emoji: '🌀', title: 'Случайные кадры', hint: 'Смаз, темнота, палец на объективе, снимки пола — по оценке AI.',
+    test: it => it.ai === 'junk' },
+  { key: 'eyes', emoji: '😴', title: 'Закрыты глаза, а в серии есть кадр лучше', hint: 'В той же серии есть кадр, где у всех открыты глаза.',
+    test: it => it.qc > 0 && it.s && !it.sb && (S.series.get(it.s) || []).some(x => x.id !== it.id && !(x.qc > 0)) },
+  { key: 'series', emoji: '🎞️', title: 'Лишние кадры серий', hint: 'Всё, кроме рекомендованных ★. Если хочется сравнить кадры рядом — откройте серию (S).',
+    test: it => it.s && !it.sb },
+  { key: 'exact', emoji: '⧉', title: 'Точные копии', hint: 'Тот же файл байт в байт; остаётся лучшая копия ★.',
+    test: it => it.d && it.dx && !it.db },
+  { key: 'near', emoji: '🗜️', title: 'Пересжатые копии', hint: 'Та же картинка хуже качеством — например, из WhatsApp; остаётся лучшая ★.',
+    test: it => it.d && !it.dx && !it.db },
+  { key: 'shots', emoji: '📱', title: 'Скриншоты старше года', hint: 'Обычно нужны ненадолго: маршруты, брони, переписка.',
+    test: it => it.c === 'screenshot' && it.t != null && it.t < Date.now() / 1000 - YEAR },
+  { key: 'memes', emoji: '😂', title: 'Мемы и картинки из мессенджеров', hint: 'Пересланные картинки, не ваши снимки.',
+    test: it => it.c === 'messenger' && (it.ai === 'memes' || it.ai === 'screens') },
+  { key: 'screens', emoji: '💻', title: 'Фото экранов', hint: 'Сфотографированный монитор или телефон — по оценке AI.',
+    test: it => it.c === 'photo' && it.ai === 'screens' },
+];
+const CLEAN_PREVIEW_ROWS = 2;
+
+function cleanSections() {
+  const secs = CLEAN.map(c => ({ ...c, items: [] }));
+  for (const it of S.items) {
+    if (it.st !== 0 || !passFilters(it, false)) continue;
+    const sec = secs.find(c => c.test(it));
+    if (sec) sec.items.push(it);
+  }
+  return secs.filter(c => c.items.length);
+}
+
+function renderClean() {
+  const el = $('#view-clean');
+  const secs = cleanSections();
+  const total = secs.reduce((n, c) => n + c.items.length, 0);
+  const size = secs.reduce((n, c) => n + c.items.reduce((a, i) => a + (i.sz || 0), 0), 0);
+  const analyzed = S.items.some(i => i.ai), rated = S.items.some(i => i.qf != null);
+  const aiNote = !analyzed || !rated
+    ? `<div class="clean-note ai">✨ ${!analyzed ? 'Случайные кадры, мемы и фото экранов находит нейросеть' : 'Кадры с закрытыми глазами находит оценка кадра'} — запустите ${!analyzed ? 'анализ' : 'оценку'} на <button class="link" data-act="go-ai">странице «AI»</button>.</div>` : '';
+  S.list = [];
+  // в карточке плиток в ряду меньше, чем в ленте (поля карточки) — превью ровно в CLEAN_PREVIEW_ROWS ряда
+  const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 4;
+  const thumb = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--thumb')) || 160;
+  const perRow = Math.max(1, Math.floor((el.clientWidth - 44 - 34 + gap) / (thumb + gap)));
+  let html = `<div class="list-head"><h2>Можно удалить</h2>
+    <span class="sub">${total ? `${plural(total, 'файл', 'файла', 'файлов')} · ${fmtSize(size)}` : ''}</span><div class="spacer"></div>
+    ${total ? `<button class="btn reject" data-act="clean-mark" title="Отметить к удалению всё, что на этой странице">Отметить всё к удалению</button>` : ''}</div>
+    <div class="clean-note">Подсказки по неразобранным снимкам. «Отметить» кладёт их в <b>Корзину отбора</b> — сами файлы удаляются только после подтверждения там. Клавиши как в ленте: <kbd>X</kbd> удалить, <kbd>P</kbd> оставить, двойной клик — открыть.</div>${aiNote}`;
+  if (!total) html += emptyHTML('Пока нечего предложить', 'Здесь появятся случайные кадры, лишние кадры серий, копии, старые скриншоты и мемы из мессенджеров.');
+  for (const sec of secs) {
+    const open = S.cleanOpen.has(sec.key), limit = CLEAN_PREVIEW_ROWS * perRow;
+    const shown = open ? sec.items : sec.items.slice(0, limit);
+    S.list.push(...shown);
+    const secSize = sec.items.reduce((a, i) => a + (i.sz || 0), 0);
+    html += `<section class="card clean-sec"><div class="card-head"><span class="emo clean-emo">${sec.emoji}</span>
+        <div class="clean-t"><span class="t">${sec.title}</span><span class="sub">${sec.hint}</span></div><div class="spacer"></div>
+        <span class="pill">${plural(sec.items.length, 'файл', 'файла', 'файлов')} · ${fmtSize(secSize)}</span>
+        <button class="btn small reject" data-act="clean-mark" data-sec="${sec.key}">Отметить ${sec.items.length > 1 ? 'все' : ''}</button></div>
+      <div class="tiles">${tilesHTML(shown, 0, shown.length, { noSeries: sec.key !== 'series' && sec.key !== 'eyes' })}</div>
+      ${sec.items.length > limit ? `<button class="link clean-more" data-act="clean-more" data-sec="${sec.key}">${open ? 'Свернуть' : `Показать все ${sec.items.length}`}</button>` : ''}</section>`;
+  }
+  el.innerHTML = html;
+}
+
+async function cleanMark(secs) {
+  const items = secs.flatMap(c => c.items);
+  if (!items.length) return;
+  const size = items.reduce((a, i) => a + (i.sz || 0), 0);
+  const what = secs.length === 1 ? `«${secs[0].title}»` : 'все подсказки';
+  if (items.length > 20 && !await confirmModal('Отметить к удалению?', `<p>${what}: ${plural(items.length, 'файл', 'файла', 'файлов')}, ${fmtSize(size)}.</p><p class="muted">Они попадут в «Корзину отбора» — там их можно проверить и вернуть. Файлы удаляются только после подтверждения.</p>`, 'Отметить')) return;
+  await applyStatuses(new Map(items.map(i => [i.id, 2])));
+  toast(`${plural(items.length, 'файл', 'файла', 'файлов')} в «Корзине отбора» · ${fmtSize(size)}`);
+}
+
 // ============================================================ нейросеть (страница «AI»)
 let aiTimer = null;
 
@@ -1984,6 +2076,35 @@ async function aiPoll() {
 
 // Запрос похож на имя файла (цифры, IMG_1234, DSC…): по смыслу такое не ищем, иначе в выдаче сотни случайных снимков
 const FILE_QUERY = /^[\d\s._-]+$|^(img|dsc|dscn|pxl|mvimg|vid|photo|video|screenshot)[\s_-]?\d/i;
+
+/** Показать в ленте снимки, похожие на этот: сам снимок первым, дальше — по убыванию сходства. */
+async function findSimilar(it) {
+  if (!it) return;
+  if (!it.ai) { toast(S.items.some(i => i.ai) ? 'Этот снимок ещё не проанализирован — запустите анализ новых на странице «AI»' : 'Похожие снимки ищет нейросеть: скачайте модель и запустите анализ на странице «AI»', true, 6000); return; }
+  let r;
+  try { r = await api(`/api/ai/similar/${it.id}`); } catch (e) { toast(esc(e.message), true); return; }
+  showFound([it.id, ...r.hits.map(([id]) => id)], `Похожие на «${fileName(it)}»`);
+}
+
+/** Поиск по картинке, перетащенной в окно из проводника или браузера. */
+async function findByImage(file) {
+  const hint = toast(`Ищу снимки, похожие на «${esc(file.name)}»…`, false, 30000);
+  try {
+    const r = await fetch('/api/ai/similar-image', { method: 'POST', body: file });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || r.statusText);
+    showFound(j.hits.map(([id]) => id), `Похожие на «${file.name}»`);
+  } catch (e) { toast(esc(e.message), true, 6000); } finally { hint.remove(); }
+}
+
+function showFound(ids, title) {
+  runSearch.seq = (runSearch.seq || 0) + 1;  // отменить незаконченный текстовый поиск
+  $('#aiQuery').value = '';
+  S.search = { q: title, title, rank: new Map(ids.map((id, i) => [id, i])) };
+  S.view = 'grid';
+  filtersChanged();
+  $('#view-grid').scrollTop = 0;
+}
 
 /** Поиск: сначала совпадения по имени файла, затем (если папка проанализирована) — по описанию того, что на снимке. */
 async function runSearch(q) {
@@ -2229,6 +2350,22 @@ function bindUI() {
   });
   cal.addEventListener('mouseover', e => { const d = e.target.closest('[data-cal-day]'); if (d && CAL.anchor) paintRange(d.dataset.calDay); });
   cal.addEventListener('mouseleave', () => { if (CAL.anchor) paintRange(); });
+  // картинку из проводника можно бросить в окно — найдём похожие снимки в папке
+  let dragDepth = 0;
+  const isFileDrag = e => S.root && [...(e.dataTransfer?.types || [])].includes('Files');
+  document.addEventListener('dragenter', e => { if (!isFileDrag(e)) return; e.preventDefault(); dragDepth++; $('#dropHint').classList.remove('hidden'); });
+  document.addEventListener('dragover', e => { if (isFileDrag(e)) e.preventDefault(); });
+  document.addEventListener('dragleave', e => { if (isFileDrag(e) && --dragDepth <= 0) { dragDepth = 0; $('#dropHint').classList.add('hidden'); } });
+  document.addEventListener('drop', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragDepth = 0;
+    $('#dropHint').classList.add('hidden');
+    const file = [...e.dataTransfer.files].find(f => /^image\//.test(f.type) || /\.(heic|heif|jpe?g|png|webp)$/i.test(f.name));
+    if (!file) { toast('Перетащите картинку: JPEG, PNG, HEIC или WebP', true); return; }
+    if (!S.items.some(i => i.ai)) { toast('Поиск по картинке работает после анализа на странице «AI»', true, 6000); return; }
+    findByImage(file);
+  });
   // всплывающие карточки внизу панели: открыта только одна, клик мимо — закрыть
   $$('.sb-pop').forEach(d => d.addEventListener('toggle', () => { if (d.open) $$('.sb-pop').forEach(o => { if (o !== d) o.open = false; }); }));
   document.addEventListener('mousedown', e => { if (!e.target.closest('.sb-pop')) $$('.sb-pop[open]').forEach(d => { d.open = false; }); });
@@ -2294,7 +2431,7 @@ function bindUI() {
   });
   main.addEventListener('dblclick', e => {
     const tile = e.target.closest('.tile');
-    if (!tile || !['grid', 'trash'].includes(S.view)) return;
+    if (!tile || !['grid', 'trash', 'clean'].includes(S.view)) return;
     const it = S.byId.get(+tile.dataset.id);
     if (S.collapse && it.s && S.view === 'grid') openSeries(it.s); else openViewer(S.list, it.id);
   });

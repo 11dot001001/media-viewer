@@ -7,10 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from . import ai, matching, media, quality, trash
@@ -454,3 +455,24 @@ def ai_rate_stop():
     if lb.rater is not None:
         lb.rater.cancel()
     return _ai_state()
+
+
+@app.get("/api/ai/similar/{mid}")
+def ai_similar(mid: int):
+    try:
+        return {"hits": ai.similar(lib(), mid)}
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.post("/api/ai/similar-image")
+async def ai_similar_image(request: Request):
+    """Поиск по картинке: тело запроса — сам файл (перетащили в окно)."""
+    data = await request.body()
+    if not data or len(data) > 60 * 1024 * 1024:
+        raise HTTPException(400, "Пустой или слишком большой файл")
+    try:
+        # модель может грузиться пару секунд — не держим остальные запросы
+        return {"hits": await run_in_threadpool(ai.similar_to_image, lib(), AI, data)}
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e

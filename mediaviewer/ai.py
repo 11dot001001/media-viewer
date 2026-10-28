@@ -424,3 +424,39 @@ def search(lib, manager: Manager, text: str, limit: int = 600) -> list[list]:
     top = float(probs[order[0]])
     keep = [int(j) for j in order if probs[j] >= max(top * 0.02, 1e-5)]
     return [[int(ids[j]), round(float(probs[j]), 6)] for j in keep]
+
+
+# Похожие снимки: косинус эмбеддингов. На снимках из поездки у случайных пар медиана 0.57,
+# тот же вид / место / человек — от ~0.72 (люки к люкам, ночной замок к ночному замку).
+SIMILAR_MIN = 0.72
+SIMILAR_AT_LEAST = 8  # если порог прошли немногие — всё равно показать ближайшие
+
+
+def _nearest(ids: np.ndarray, mat: np.ndarray, q: np.ndarray, skip: int | None, limit: int) -> list[list]:
+    sims = mat @ q
+    order = [int(j) for j in np.argsort(-sims)[:limit + 1] if ids[j] != skip][:limit]
+    keep = [j for i, j in enumerate(order) if sims[j] >= SIMILAR_MIN or i < SIMILAR_AT_LEAST]
+    return [[int(ids[j]), round(float(sims[j]), 4)] for j in keep]
+
+
+def similar(lib, mid: int, limit: int = 300) -> list[list]:
+    """Снимки, похожие на снимок mid (по сохранённым эмбеддингам): [[id, сходство], ...], сам снимок не входит."""
+    ids, mat = _matrix(lib)
+    pos = np.nonzero(ids == mid)[0]
+    if not len(pos):
+        raise RuntimeError("Этот снимок ещё не проанализирован — запустите анализ на странице «AI»")
+    q = mat[pos[0]]
+    return _nearest(ids, mat, q / max(float(np.linalg.norm(q)), 1e-8), mid, limit)
+
+
+def similar_to_image(lib, manager: Manager, data: bytes, limit: int = 300) -> list[list]:
+    """Снимки папки, похожие на присланную картинку (её никуда не сохраняем)."""
+    ids, mat = _matrix(lib)
+    if not len(ids):
+        return []
+    try:
+        pix = Engine.preprocess(data)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("Не удалось прочитать картинку — подойдут JPEG, PNG, HEIC, WebP") from e
+    q = manager.engine().embed_images(pix[None])[0]
+    return _nearest(ids, mat, q, None, limit)
