@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import ai, gemma, matching, media, people, quality, trash
+from . import ai, gemma, matching, media, ocr, people, quality, trash
 from .journal import Journal
 from .library import Library
 from .phone import FolderDevice, PhoneLibrary, WpdDevice
@@ -29,6 +29,7 @@ RECENT_FILE = DATA / "recent.json"
 # Модели по смыслу (категории, поиск, красота кадра): работает одна, выбранная на странице «AI»
 MODELS = {ai.MODEL: ai.Manager(DATA), ai.GEMMA: gemma.manager(DATA)}
 FACES = ai.faces_manager(DATA)  # модели лиц: оценка кадра
+OCR = ocr.OcrManager(DATA)  # текст на снимках: распознавание Windows, ставятся только пакеты winrt
 
 
 def semantic() -> ai.Manager:
@@ -367,6 +368,8 @@ def _ai_state() -> dict:
     if _lib is not None:
         res["analysis"] = _job(_lib.analyzer, ai.counts(_lib))
         res["quality"] = _job(_lib.rater, quality.counts(_lib))
+        res["reading"] = _job(_lib.reader, ocr.counts(_lib))
+    res["ocr"] = OCR.info()
     return res
 
 
@@ -377,6 +380,8 @@ class ModelReq(BaseModel):
 def _manager(req: ModelReq | None) -> ai.Manager:
     if req and req.model == ai.FACES:
         return FACES
+    if req and req.model == "ocr":
+        return OCR
     return MODELS.get(req.model) if req and req.model in MODELS else semantic()
 
 
@@ -388,7 +393,7 @@ def ai_state():
 @app.post("/api/ai/install")
 def ai_install(req: ModelReq | None = None):
     m = _manager(req)
-    if any(o.busy() for o in (*MODELS.values(), FACES) if o is not m):
+    if any(o.busy() for o in (*MODELS.values(), FACES, OCR) if o is not m):
         raise HTTPException(409, "Дождитесь окончания другой установки")
     m.install()
     return _ai_state()
@@ -569,3 +574,31 @@ def face(fid: int):
     if data is None:
         return Response(NO_THUMB, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
     return Response(data, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+
+
+# ---------------------------------------------------------------- текст на снимках
+
+@app.post("/api/ai/ocr")
+def ai_ocr():
+    lb = lib()
+    if not OCR.ready():
+        raise HTTPException(409, "Сначала установите распознавание текста")
+    if lb.scanning:
+        raise HTTPException(409, "Дождитесь окончания сканирования папки")
+    if lb.reader is None:
+        lb.reader = ocr.Reader(lb, OCR)
+    lb.reader.start()
+    return _ai_state()
+
+
+@app.post("/api/ai/ocr-stop")
+def ai_ocr_stop():
+    lb = lib()
+    if lb.reader is not None:
+        lb.reader.cancel()
+    return _ai_state()
+
+
+@app.post("/api/ocr/search")
+def ocr_search(req: SearchReq):
+    return {"hits": ocr.search(lib(), req.q)}

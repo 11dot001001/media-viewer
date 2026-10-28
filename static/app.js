@@ -1418,6 +1418,7 @@ async function loadInfo(it) {
     d.duration ? ['Длительность', fmtDur(d.duration)] : null,
     d.sharpness != null ? ['Резкость', Math.round(d.sharpness)] : null,
     d.quality ? ['Оценка кадра', qualityText(d.quality)] : null,
+    d.text ? ['Текст', `<div class="ocr-text">${esc(d.text)}</div><button class="link" data-act="copy-text">скопировать</button>`] : null,
     ['Место', d.lat != null ? `${d.lat.toFixed(5)}, ${d.lon.toFixed(5)}<br><button class="link" data-act="onmap">показать на карте</button>` : '—'],
     d.children?.length ? ['Связанные', d.children.map(c => esc(c.path.split('/').pop()) + ' · ' + fmtSize(c.size)).join('<br>')] : null,
     it.s ? ['Серия', `${S.series.get(it.s)?.length || ''} кадров${it.sb ? ' · ★ рекомендован' : ''}`] : null,
@@ -1666,6 +1667,13 @@ async function onAction(act, el) {
     case 'phone-find': phoneFind(); break;
     case 'stats-more': statsModal(); break;
     case 'pp-open': openPerson(el.dataset.key); break;
+    case 'copy-text': {
+      const t = el.previousElementSibling?.textContent || '';
+      navigator.clipboard.writeText(t).then(() => toast('Текст скопирован'), () => toast('Не удалось скопировать', true));
+      break;
+    }
+    case 'ai-ocr': aiCall('/api/ai/ocr'); break;
+    case 'ai-ocr-stop': aiCall('/api/ai/ocr-stop'); break;
     case 'pp-faces': personFaces(el.dataset.key); break;
     case 'pp-hide': peopleCall('/api/people/hide', { key: el.dataset.key }); break;
     case 'pp-unhide': peopleCall('/api/people/unhide'); break;
@@ -2062,6 +2070,7 @@ async function aiPoll() {
   aiTimer = null;
   const wasRunning = S.aiInfo?.analysis?.running;
   const wasRating = S.aiInfo?.quality?.running;
+  const wasReading = S.aiInfo?.reading?.running;
   let info;
   try { info = await api('/api/ai'); } catch { return; }
   const changed = JSON.stringify(info) !== JSON.stringify(S.aiInfo);
@@ -2069,7 +2078,12 @@ async function aiPoll() {
   S.ai.ready = info.packages && info.installed;
   const a = info.analysis, q = info.quality;
   const models = Object.values(info.models || {});
-  const running = models.some(m => m.busy) || info.faces?.busy || a?.running || q?.running;
+  const rd = info.reading;
+  const running = models.some(m => m.busy) || info.faces?.busy || info.ocr?.busy || a?.running || q?.running || rd?.running;
+  if (wasReading && !rd?.running) {
+    if (rd?.phase === 'done') toast(`Текст прочитан: он есть на ${plural(rd.with_text, 'снимке', 'снимках', 'снимках')}. Ищите в поиске слева`);
+    if (rd?.phase === 'error') toast(esc(rd.message), true, 8000);
+  }
   if (wasRunning && !a?.running) {
     loadItems();
     if (a?.phase === 'done') toast('Анализ завершён: категории по смыслу и поиск — в панели слева');
@@ -2079,7 +2093,7 @@ async function aiPoll() {
     if (q?.phase === 'done') toast(`Оценка завершена${q.closed ? `: закрыты глаза на ${plural(q.closed, 'кадре', 'кадрах', 'кадрах')}` : ''}. ★ в сериях выбраны заново`);
     if (q?.phase === 'error') toast(esc(q.message), true, 8000);
   } else if ((a?.running || q?.running) && Date.now() - lastLoad > 8000) loadItems();
-  for (const job of [...models.map(m => m.job), info.faces?.job]) {
+  for (const job of [...models.map(m => m.job), info.faces?.job, info.ocr?.job]) {
     if (job?.phase === 'error' && aiPoll.shownErr !== job.message) {
       aiPoll.shownErr = job.message;
       toast(esc(job.message), true, 10000);
@@ -2088,7 +2102,7 @@ async function aiPoll() {
   if (S.view === 'ai' && changed) renderAI();  // без изменений не перерисовываем: иначе сбивается наведение на кнопки
   const peopleWait = S.view === 'people' && !S.people?.faces;  // «Люди» до первой оценки показывают её ход
   if (peopleWait && changed) renderPeople();
-  const job = a?.running ? a : q?.running ? q : null;
+  const job = a?.running ? a : q?.running ? q : rd?.running ? rd : null;
   $('#cnt-ai').textContent = job && job.total ? Math.floor(job.done / job.total * 100) + ' %' : running ? '…' : '';
   if (running || S.view === 'ai' || peopleWait) aiTimer = setTimeout(aiPoll, running ? 800 : 3000);
 }
@@ -2133,6 +2147,9 @@ async function runSearch(q) {
   if (!q) { S.search = null; filtersChanged(); return; }
   const ql = q.toLowerCase();
   const ids = S.items.filter(i => i.p.toLowerCase().includes(ql)).map(i => i.id);
+  // текст на снимке: точное совпадение надёжнее смысла, поэтому сразу после имени файла (и номера тоже ищем)
+  try { ids.push(...(await api('/api/ocr/search', { q })).hits); } catch (e) { toast(esc(e.message), true); }
+  if (seq !== runSearch.seq) return;
   if (S.items.some(i => i.ai) && !FILE_QUERY.test(q)) {
     $('#aiSearch').classList.add('busy');  // первый запрос ждёт загрузки модели, это пара секунд
     try {
@@ -2273,7 +2290,28 @@ function renderAI() {
         <p class="muted">Находит лица и проверяет, не закрыты ли глаза и не смазаны ли лица. Вместе с красотой кадра от модели по смыслу это решает, какой кадр серии отметить ★. Заодно запоминает, чьё это лицо, — для страницы «Люди». Для снимков с людьми читается оригинал, остальные оцениваются по миниатюре.</p>
         ${modelBlock(f, 'faces', `Скачиваются три небольшие модели лиц (≈ ${fmtSize(f.download_size)}): YuNet, MediaPipe Face Mesh и SFace для узнавания людей.${f.packages ? '' : ' Если ONNX Runtime ещё не установлен, он поставится вместе с ними.'}`)}
         ${rate}</div>
+      ${ocrCard(info)}
     </div>`;
+}
+
+/** Текст на снимках: распознавание Windows, своя кнопка установки (пакеты winrt) и запуска. */
+function ocrCard(info) {
+  const o = info.ocr, rd = info.reading;
+  if (!o) return '';
+  const ready = o.packages && o.installed;
+  const ru = o.languages.some(l => l.startsWith('ru'));
+  let body;
+  if (!o.supported) body = '<p class="muted">Распознавание текста встроено только в Windows.</p>';
+  else if (!ready) body = modelBlock(o, 'ocr', 'Модель скачивать не нужно — она встроена в Windows. Ставятся только маленькие пакеты winrt для Python (≈ 2 МБ).').replace('Скачать модель', 'Установить');
+  else if (!S.root || !rd) body = `<p class="muted">Откройте папку, чтобы прочитать текст на её снимках.</p>`;
+  else {
+    body = jobBlock(rd, !o.busy, 'ai-ocr', 'ai-ocr-stop', 'Прочитать', 'фото');
+    if (rd.done) body += `<p class="muted">Текст найден на ${plural(rd.with_text, 'снимке', 'снимках', 'снимках')}. Ищите в поиске слева: «бронь», «Wi-Fi», номер заказа.</p>`;
+  }
+  const langs = o.languages.length ? `Языки: ${o.languages.join(', ')}.${ru ? '' : ' Для русского текста добавьте в Windows русский язык (Параметры → Время и язык → Язык).'}` : '';
+  return `<div class="card ai-card wide"><div class="card-head"><span class="t">Текст на снимках</span>${ready ? '<span class="pill ok">Готово</span>' : '<span class="pill">Не установлено</span>'}</div>
+    <p class="muted">Читает надписи на скриншотах, документах, чеках и вывесках, чтобы находить снимки по тексту. Сначала скриншоты и документы, потом остальные фото. Оригиналы читаются с диска, около 30 фото в секунду; файлы, которые есть только в облаке, пропускаются. ${langs}</p>
+    ${body}</div>`;
 }
 
 // ============================================================ люди

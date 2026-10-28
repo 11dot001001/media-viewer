@@ -1026,3 +1026,4 @@ body.tiles-tiny #view-trash .ph-inset i { display: none; }
 .pp-f.on::after { content: "✕"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 22px; font-weight: 700;
   color: #fff; background: rgba(255, 95, 115, .45); }
 .pp-start { max-width: 640px; }
+.ocr-text { white-space: pre-wrap; max-height: 180px; overflow: auto; font-size: 12px; line-height: 1.45; color: var(--text-2); }

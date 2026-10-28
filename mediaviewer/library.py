@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS faces(id INTEGER PRIMARY KEY AUTOINCREMENT, media_id 
   person INTEGER, cluster INTEGER, who INTEGER);
 CREATE INDEX IF NOT EXISTS ix_faces_media ON faces(media_id);
 CREATE INDEX IF NOT EXISTS ix_faces_cluster ON faces(cluster);
+CREATE TABLE IF NOT EXISTS ocr(id INTEGER PRIMARY KEY, version INTEGER, mtime REAL, text TEXT);
 CREATE TABLE IF NOT EXISTS persons(id INTEGER PRIMARY KEY, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
 """
 
@@ -107,6 +108,8 @@ class Library:
         self.finder = None  # PhoneFinder: поиск файлов корзины на телефоне
         self.analyzer = None  # ai.Analyzer: анализ нейросетью, запускается со страницы «AI»
         self.rater = None  # quality.Rater: оценка кадров (глаза, резкость лиц), запускается со страницы «AI»
+        self.reader = None  # ocr.Reader: чтение текста на снимках, запускается со страницы «AI»
+        self.ocr_version = 0  # растёт при каждой записи в таблицу ocr (сбрасывает кэш поиска по тексту)
         self.ai_version = 0  # растёт при каждой записи в таблицу ai (сбрасывает кэш поиска)
         self.ai_model = ai.active_model(data_dir)  # чьи категории, красоту и поиск показываем (выбор на странице «AI»)
         self._offline: set[str] = set()  # файлы, которые лежат только в облаке (см. CLOUD_ONLY_ATTRS)
@@ -189,7 +192,7 @@ class Library:
 
     def stop(self) -> None:
         self._cancel.set()
-        for job in (self.analyzer, self.rater):
+        for job in (self.analyzer, self.rater, self.reader):
             if job is not None:
                 job.cancel()
         if self._thread:
@@ -507,6 +510,8 @@ class Library:
                              LEFT JOIN ai a ON a.id = m.id AND a.model = ? LEFT JOIN quality q ON q.id = m.id
                              WHERE m.id=?""", (self.ai_model, mid)).fetchone()
             d["quality"] = dict(q) if q and any(v is not None for v in q) else None
+            t = c.execute("SELECT text FROM ocr WHERE id=?", (mid,)).fetchone()
+            d["text"] = t[0] if t and t[0] else None
             d.pop("phash", None)
             d.pop("dhash", None)
             return d
