@@ -846,6 +846,22 @@ body.tiles-tiny #view-trash .ph-inset i { display: none; }
 .ai-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
 .ai-chip .cnt { margin-left: 2px; }
 .err-text { color: var(--reject); }
+.ai-models { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin: 2px 0 12px; }
+.ai-model {
+  display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--radius-sm); text-align: left;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--text-2); cursor: pointer; font: inherit;
+  transition: background .15s, border-color .15s;
+}
+.ai-model:hover:not(:disabled) { background: var(--surface-3); }
+.ai-model:disabled { cursor: not-allowed; opacity: .6; }
+.ai-model.on { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.ai-model-head { display: flex; align-items: center; gap: 8px; }
+.ai-model-head b { color: var(--text); font-weight: 650; }
+.ai-model .radio { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line-2); flex: none; }
+.ai-model.on .radio { border-color: var(--accent); background: radial-gradient(var(--accent) 0 3px, transparent 3.5px); }
+.ai-model-speed { margin-left: auto; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.ai-model-hint { font-size: 12.5px; line-height: 1.45; }
+.ai-model-state { font-size: 11.5px; color: var(--muted); }
 
 /* ---------- оценка кадра */
 .bdg.eyes { background: rgba(244, 63, 94, .88); }

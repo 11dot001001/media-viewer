@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import ai, matching, media, quality, trash
+from . import ai, gemma, matching, media, quality, trash
 from .journal import Journal
 from .library import Library
 from .phone import FolderDevice, PhoneLibrary, WpdDevice
@@ -26,8 +26,13 @@ DATA = BASE / "data"
 DATA.mkdir(exist_ok=True)
 RECENT_FILE = DATA / "recent.json"
 
-AI = ai.Manager(DATA)  # SigLIP 2: категории по смыслу, поиск, красота кадра
+# Модели по смыслу (категории, поиск, красота кадра): работает одна, выбранная на странице «AI»
+MODELS = {ai.MODEL: ai.Manager(DATA), ai.GEMMA: gemma.manager(DATA)}
 FACES = ai.faces_manager(DATA)  # модели лиц: оценка кадра
+
+
+def semantic() -> ai.Manager:
+    return MODELS[ai.active_model(DATA)]
 
 app = FastAPI(title="Media Viewer")
 app.add_middleware(GZipMiddleware, minimum_size=2048)
@@ -131,7 +136,7 @@ def state():
         "settings": s.__dict__ if s else None,
         "trash_target": _lib.trash_target() if _lib else None,
         "tools": {"ffmpeg": bool(media.FFMPEG), "heif": media.HEIF_OK, "raw": media.rawpy is not None},
-        "ai": {"ready": AI.ready(), "labels": _ai_labels()},
+        "ai": {"ready": semantic().ready(), "labels": _ai_labels()},
     }
 
 
@@ -355,7 +360,8 @@ def _job(job, counts: dict) -> dict:
 
 
 def _ai_state() -> dict:
-    res = AI.info()
+    models = {k: m.info() for k, m in MODELS.items()}
+    res = dict(models[semantic().name], models=models)  # выбранная модель — в корне ответа, все — в models
     res["labels"] = _ai_labels()
     res["faces"] = FACES.info()
     if _lib is not None:
@@ -365,11 +371,13 @@ def _ai_state() -> dict:
 
 
 class ModelReq(BaseModel):
-    model: str = ai.MODEL
+    model: str | None = None  # без модели — выбранная модель по смыслу
 
 
 def _manager(req: ModelReq | None) -> ai.Manager:
-    return FACES if req and req.model == ai.FACES else AI
+    if req and req.model == ai.FACES:
+        return FACES
+    return MODELS.get(req.model) if req and req.model in MODELS else semantic()
 
 
 @app.get("/api/ai")
@@ -380,7 +388,7 @@ def ai_state():
 @app.post("/api/ai/install")
 def ai_install(req: ModelReq | None = None):
     m = _manager(req)
-    if (AI if m is FACES else FACES).busy():
+    if any(o.busy() for o in (*MODELS.values(), FACES) if o is not m):
         raise HTTPException(409, "Дождитесь окончания другой установки")
     m.install()
     return _ai_state()
@@ -391,7 +399,7 @@ def ai_remove(req: ModelReq | None = None):
     m = _manager(req)
     lb = _lib
     job = None if lb is None else lb.rater if m is FACES else lb.analyzer
-    if job is not None and job.running:
+    if job is not None and job.running and job.manager is m:
         raise HTTPException(409, "Сначала остановите анализ")
     try:
         m.remove()
@@ -400,15 +408,35 @@ def ai_remove(req: ModelReq | None = None):
     return _ai_state()
 
 
+@app.post("/api/ai/model")
+def ai_model(req: ModelReq):
+    """Выбрать модель по смыслу. Результаты анализа другой модели остаются в индексе — вернуться можно без пересчёта."""
+    if req.model not in MODELS:
+        raise HTTPException(400, "Неизвестная модель")
+    lb = _lib
+    if lb is not None and lb.analyzer is not None and lb.analyzer.running:
+        raise HTTPException(409, "Сначала остановите анализ")
+    ai.set_active_model(DATA, req.model)
+    for key, m in MODELS.items():
+        if key != req.model:
+            m.unload()  # не держать в видеопамяти модель, которой больше не пользуемся
+    if lb is not None:
+        lb.ai_model = req.model
+        lb.ai_version += 1
+        lb.regroup()  # у моделей своя красота кадра — ★ в сериях выбираются заново
+    return _ai_state()
+
+
 @app.post("/api/ai/analyze")
 def ai_analyze():
     lb = lib()
-    if not AI.ready():
+    m = semantic()
+    if not m.ready():
         raise HTTPException(409, "Сначала скачайте модель")
     if lb.scanning:
         raise HTTPException(409, "Дождитесь окончания сканирования папки")
-    if lb.analyzer is None:
-        lb.analyzer = ai.Analyzer(lb, AI)
+    if lb.analyzer is None or (lb.analyzer.manager is not m and not lb.analyzer.running):
+        lb.analyzer = ai.Analyzer(lb, m)
     lb.analyzer.start()
     return _ai_state()
 
@@ -431,7 +459,7 @@ def ai_search(req: SearchReq):
     if not q:
         return {"hits": []}
     try:
-        return {"hits": ai.search(lib(), AI, q)}
+        return {"hits": ai.search(lib(), semantic(), q)}
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
 
@@ -473,6 +501,6 @@ async def ai_similar_image(request: Request):
         raise HTTPException(400, "Пустой или слишком большой файл")
     try:
         # модель может грузиться пару секунд — не держим остальные запросы
-        return {"hits": await run_in_threadpool(ai.similar_to_image, lib(), AI, data)}
+        return {"hits": await run_in_threadpool(ai.similar_to_image, lib(), semantic(), data)}
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e

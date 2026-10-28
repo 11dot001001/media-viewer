@@ -1,7 +1,9 @@
-"""Нейросети страницы «AI»: SigLIP 2 (категории по смыслу и поиск по тексту) и модели лиц (оценка кадра).
+"""Нейросети страницы «AI»: модель «по смыслу» (категории, поиск по тексту, красота кадра) и модели лиц (оценка кадра).
 
+Модель по смыслу на выбор: SigLIP 2 (быстрая, любая видеокарта) или EmbeddingGemma 2 (см. gemma.py). У каждой свои
+эмбеддинги, поэтому результаты анализа хранятся отдельно для каждой модели: при переключении ничего не теряется.
 Пакеты и модели ставятся по кнопке со страницы «AI» (не всем они нужны), анализ папки тоже запускается вручную.
-Всё считается на этом компьютере. SigLIP видит только миниатюры из индекса.
+Всё считается на этом компьютере. Модели по смыслу видят только миниатюры из индекса.
 """
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import gc
 import importlib
 import importlib.util
 import io
+import json
 import shutil
 import subprocess
 import sys
@@ -35,6 +38,8 @@ FACES_FILES = {
 }
 FACES_SIZE = 5 * 1024 ** 2
 REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements-ai.txt"
+GEMMA = "embeddinggemma-2"
+SEMANTIC = (MODEL, GEMMA)  # модели по смыслу, из которых выбирают на странице «AI»
 
 # Обученные параметры google/siglip2-base-patch16-224: вероятность совпадения = sigmoid(scale · cos + bias)
 LOGIT_SCALE = float(np.exp(4.7244534))
@@ -77,6 +82,26 @@ def _sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+# ---------------------------------------------------------------- выбор модели
+
+def _settings_file(data_dir: Path) -> Path:
+    return data_dir / "ai" / "settings.json"
+
+
+def active_model(data_dir: Path) -> str:
+    try:
+        key = json.loads(_settings_file(data_dir).read_text(encoding="utf-8")).get("model")
+    except (OSError, ValueError):
+        key = None
+    return key if key in SEMANTIC else MODEL
+
+
+def set_active_model(data_dir: Path, key: str) -> None:
+    f = _settings_file(data_dir)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"model": key}), encoding="utf-8")
+
+
 # ---------------------------------------------------------------- установка
 
 class Manager:
@@ -94,8 +119,9 @@ class Manager:
         self.factory = factory or Engine
         self.job = {"phase": "idle", "done": 0, "total": 0, "message": ""}
         self._thread: threading.Thread | None = None
-        self._engine: Engine | None = None
+        self._engine = None
         self._lock = threading.Lock()
+        self._size: int | None = None  # место на диске; считается заново после установки и удаления
 
     @staticmethod
     def packages_ok() -> bool:
@@ -111,8 +137,9 @@ class Manager:
         return self._thread is not None and self._thread.is_alive()
 
     def info(self) -> dict:
-        size = sum(p.stat().st_size for p in self.dir.rglob("*") if p.is_file()) if self.dir.exists() else 0
-        return {"model": self.name, "packages": self.packages_ok(), "installed": self.model_ok(), "size": size,
+        if self._size is None or self.busy():
+            self._size = sum(p.stat().st_size for p in self.dir.rglob("*") if p.is_file()) if self.dir.exists() else 0
+        return {"model": self.name, "packages": self.packages_ok(), "installed": self.model_ok(), "size": self._size,
                 "download_size": self.size, "job": dict(self.job), "busy": self.busy(),
                 "device": getattr(self._engine, "device", None)}
 
@@ -125,19 +152,20 @@ class Manager:
     def _install_safe(self) -> None:
         try:
             if not self.packages_ok():
-                self.job = {"phase": "packages", "done": 0, "total": 0, "message": "Установка пакетов ONNX Runtime…"}
-                r = subprocess.run([sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
-                                    "-r", str(REQUIREMENTS)], capture_output=True, text=True, encoding="utf-8",
-                                   errors="replace")
-                importlib.invalidate_caches()
-                if r.returncode != 0 or not self.packages_ok():
-                    tail = (r.stderr or r.stdout).strip().splitlines()[-3:]
-                    raise RuntimeError("pip не смог установить пакеты: " + " ".join(tail))
+                self._install_packages()
             self._download()
             self.job = {"phase": "done", "done": 0, "total": 0, "message": "Модель установлена"}
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             self.job = {"phase": "error", "done": 0, "total": 0, "message": str(e)[:400]}
+        self._size = None
+
+    def _install_packages(self) -> None:
+        self.job = {"phase": "packages", "done": 0, "total": 0, "message": "Установка пакетов ONNX Runtime…"}
+        pip(sys.executable, "-r", str(REQUIREMENTS))
+        importlib.invalidate_caches()
+        if not self.packages_ok():
+            raise RuntimeError("pip не смог установить пакеты ONNX Runtime")
 
     def _download(self) -> None:
         todo = [f for f in self.files if not (self.dir / f).is_file()]
@@ -170,19 +198,36 @@ class Manager:
     def remove(self) -> None:
         if self.busy():
             raise RuntimeError("Дождитесь окончания установки")
-        with self._lock:
-            self._engine = None
-        gc.collect()  # закрыть сессии ONNX Runtime, иначе Windows не даст удалить файлы модели
+        self.unload()
         shutil.rmtree(self.dir, ignore_errors=True)
         self.job = {"phase": "idle", "done": 0, "total": 0, "message": ""}
+        self._size = None
+
+    def unload(self) -> None:
+        """Выгрузить модель из памяти (и видеопамяти): при удалении и когда выбрали другую модель."""
+        with self._lock:
+            eng, self._engine = self._engine, None
+        if eng is not None and hasattr(eng, "close"):
+            eng.close()
+        gc.collect()  # закрыть сессии ONNX Runtime, иначе Windows не даст удалить файлы модели
 
     def engine(self):
         with self._lock:
+            if self._engine is not None and not getattr(self._engine, "alive", True):
+                self._engine = None  # процесс модели упал — запустим заново
             if self._engine is None:
                 if not self.ready():
                     raise RuntimeError("Модель не установлена — скачайте её на странице «AI»")
                 self._engine = self.factory(self.dir)
             return self._engine
+
+
+def pip(python: str, *args: str) -> None:
+    r = subprocess.run([python, "-m", "pip", "install", "--disable-pip-version-check", *args],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout).strip().splitlines()[-3:]
+        raise RuntimeError("pip не смог установить пакеты: " + " ".join(tail))
 
 
 def faces_manager(data_dir: Path) -> Manager:
@@ -195,6 +240,11 @@ def faces_manager(data_dir: Path) -> Manager:
 # ---------------------------------------------------------------- модель
 
 class Engine:
+    """SigLIP 2. Интерфейс модели по смыслу (его же повторяет gemma.GemmaEngine): prepare → embed_batch,
+    embed_texts, label_matrix, classify, aesthetic, keep_hits."""
+
+    batch = BATCH
+
     def __init__(self, model_dir: Path):
         import onnxruntime as ort
         from tokenizers import Tokenizer
@@ -252,6 +302,12 @@ class Engine:
         a = np.asarray(img, dtype=np.float32) / 127.5 - 1.0  # rescale 1/255, normalize mean 0.5 std 0.5
         return a.transpose(2, 0, 1)
 
+    def prepare(self, data: bytes) -> np.ndarray:
+        return self.preprocess(data)
+
+    def embed_batch(self, prepared: list[np.ndarray]) -> np.ndarray:
+        return self.embed_images(np.stack(prepared))
+
     def embed_images(self, pixels: np.ndarray) -> np.ndarray:
         with self._run_lock:
             out = self.vision.run(None, {self._vin: pixels})[self._vout]
@@ -289,12 +345,19 @@ class Engine:
             res.append((LABELS[i][0], float(row[i])) if row[i] > 0 else (OTHER, float(top.max())))
         return res
 
-
     def aesthetic(self, emb: np.ndarray) -> np.ndarray:
         if self._aes is None:
             self._aes = self.embed_texts(list(AES_PROMPTS))
         s = 100.0 * (emb @ self._aes.T)
         return 1.0 / (1.0 + np.exp(s[:, 1] - s[:, 0]))
+
+    @staticmethod
+    def keep_hits(sims: np.ndarray, order: np.ndarray) -> tuple[np.ndarray, list[int]]:
+        """Оценки для выдачи поиска и какие из лучших (order) оставить."""
+        probs = _sigmoid(LOGIT_SCALE * sims + LOGIT_BIAS)
+        # Порог относительный: у разных запросов вероятности отличаются на порядки
+        top = float(probs[order[0]])
+        return probs, [int(j) for j in order if probs[j] >= max(top * 0.02, 1e-5)]
 
 
 # ---------------------------------------------------------------- анализ папки
@@ -337,55 +400,58 @@ class Analyzer:
 
     def _run(self) -> None:
         eng = self.manager.engine()
+        model = self.manager.name
         eng.label_matrix()
         with self.lib.connect() as c:
             c.execute("DELETE FROM ai WHERE id NOT IN (SELECT id FROM media WHERE parent_id IS NULL)")
             # Снимки, проанализированные до появления оценки красоты: досчитываем по сохранённым эмбеддингам
-            old = c.execute("SELECT id, emb FROM ai WHERE model = ? AND aes IS NULL", (MODEL,)).fetchall()
+            old = c.execute("SELECT id, emb FROM ai WHERE model = ? AND aes IS NULL", (model,)).fetchall()
             for i in range(0, len(old), 1024):
                 part = old[i:i + 1024]
                 mat = np.frombuffer(b"".join(r[1] for r in part), dtype=np.float16).reshape(len(part), -1)
                 aes = eng.aesthetic(mat.astype(np.float32))
-                c.executemany("UPDATE ai SET aes = ? WHERE id = ?", [(float(a), r[0]) for a, r in zip(aes, part)])
+                c.executemany("UPDATE ai SET aes = ? WHERE id = ? AND model = ?",
+                              [(float(a), r[0], model) for a, r in zip(aes, part)])
             todo = [r[0] for r in c.execute(
-                """SELECT m.id FROM media m JOIN thumbs t ON t.id = m.id LEFT JOIN ai a ON a.id = m.id
-                   WHERE m.parent_id IS NULL AND (a.id IS NULL OR a.model != ? OR a.mtime IS NOT m.mtime)
-                   ORDER BY m.ts DESC""", (MODEL,))]
+                """SELECT m.id FROM media m JOIN thumbs t ON t.id = m.id LEFT JOIN ai a ON a.id = m.id AND a.model = ?
+                   WHERE m.parent_id IS NULL AND (a.id IS NULL OR a.mtime IS NOT m.mtime)
+                   ORDER BY m.ts DESC""", (model,))]
         self.status.update(phase="analyze", total=len(todo), done=0, message=f"Анализ на: {eng.device}")
         pool = ThreadPoolExecutor(4)
+
+        def prepare(data: bytes):
+            try:
+                return eng.prepare(data)
+            except Exception:  # noqa: BLE001 — битая миниатюра
+                return None
+
+        step = eng.batch
         try:
             with self.lib.connect() as c:
-                for i in range(0, len(todo), BATCH):
+                for i in range(0, len(todo), step):
                     if self._cancel.is_set():
                         return
-                    ids = todo[i:i + BATCH]
+                    ids = todo[i:i + step]
                     q = ",".join("?" * len(ids))
                     rows = c.execute(f"SELECT t.id, t.data, m.mtime FROM thumbs t JOIN media m ON m.id = t.id "
                                      f"WHERE t.id IN ({q})", ids).fetchall()
-                    pix = list(pool.map(lambda r: _safe_pre(r[1]), rows))
+                    pix = list(pool.map(lambda r: prepare(r[1]), rows))
                     ok = [(r, p) for r, p in zip(rows, pix) if p is not None]
                     if ok:
-                        emb = eng.embed_images(np.stack([p for _, p in ok]))
+                        emb = eng.embed_batch([p for _, p in ok])
                         labels = eng.classify(emb)
                         aes = eng.aesthetic(emb)
                         c.executemany(
                             "INSERT OR REPLACE INTO ai(id, model, mtime, emb, label, score, aes) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                            [(r[0], MODEL, r[2], e.astype(np.float16).tobytes(), lbl, sc, float(a))
+                            [(r[0], model, r[2], e.astype(np.float16).tobytes(), lbl, sc, float(a))
                              for (r, _), e, (lbl, sc), a in zip(ok, emb, labels, aes)])
                         c.commit()
                     self.status["done"] = min(len(todo), i + len(ids))
                     self.lib.ai_version += 1
-                    if (i // BATCH) % 20 == 0:
+                    if (i // step) % max(1, 640 // step) == 0:  # ленту перечитываем примерно раз на 640 снимков
                         self.lib.status["version"] += 1
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
-
-
-def _safe_pre(data: bytes) -> np.ndarray | None:
-    try:
-        return Engine.preprocess(data)
-    except Exception:  # noqa: BLE001 — битая миниатюра
-        return None
 
 
 # ---------------------------------------------------------------- поиск
@@ -394,21 +460,24 @@ def counts(lib) -> dict:
     with lib.connect() as c:
         total = c.execute("SELECT COUNT(*) FROM media m JOIN thumbs t ON t.id = m.id WHERE m.parent_id IS NULL").fetchone()[0]
         done, no_aes = c.execute("""SELECT COUNT(*), SUM(a.aes IS NULL) FROM ai a JOIN media m ON m.id = a.id
-                                     WHERE a.model = ? AND a.mtime IS m.mtime""", (MODEL,)).fetchone()
-        labels = dict(c.execute("SELECT label, COUNT(*) FROM ai WHERE model = ? GROUP BY label", (MODEL,)).fetchall())
+                                     WHERE a.model = ? AND a.mtime IS m.mtime""", (lib.ai_model,)).fetchone()
+        labels = dict(c.execute("SELECT label, COUNT(*) FROM ai WHERE model = ? GROUP BY label",
+                                (lib.ai_model,)).fetchall())
+        # сколько снимков размечено каждой моделью: при переключении видно, что пересчитывать не придётся
+        per_model = dict(c.execute("SELECT model, COUNT(*) FROM ai GROUP BY model").fetchall())
     # no_aes: проанализированы до появления оценки красоты — её досчитает следующий запуск анализа
-    return {"total": total, "done": done, "no_aes": no_aes or 0, "labels": labels}
+    return {"total": total, "done": done, "no_aes": no_aes or 0, "labels": labels, "per_model": per_model}
 
 
 def _matrix(lib) -> tuple[np.ndarray, np.ndarray]:
     cache = getattr(lib, "_ai_cache", None)
-    if cache is None or cache[0] != lib.ai_version:
+    if cache is None or cache[0] != (lib.ai_version, lib.ai_model):
         with lib.connect() as c:
-            rows = c.execute("SELECT id, emb FROM ai WHERE model = ?", (MODEL,)).fetchall()
+            rows = c.execute("SELECT id, emb FROM ai WHERE model = ?", (lib.ai_model,)).fetchall()
         ids = np.array([r[0] for r in rows], dtype=np.int64)
         mat = (np.frombuffer(b"".join(r[1] for r in rows), dtype=np.float16).reshape(len(rows), -1).astype(np.float32)
                if rows else np.zeros((0, 768), dtype=np.float32))
-        cache = lib._ai_cache = (lib.ai_version, ids, mat)
+        cache = lib._ai_cache = ((lib.ai_version, lib.ai_model), ids, mat)
     return cache[1], cache[2]
 
 
@@ -417,25 +486,23 @@ def search(lib, manager: Manager, text: str, limit: int = 600) -> list[list]:
     ids, mat = _matrix(lib)
     if not len(ids):
         return []
-    q = manager.engine().embed_texts([text])[0]
-    probs = _sigmoid(LOGIT_SCALE * (mat @ q) + LOGIT_BIAS)
-    order = np.argsort(-probs)[:limit]
-    # Порог относительный: у разных запросов вероятности отличаются на порядки
-    top = float(probs[order[0]])
-    keep = [int(j) for j in order if probs[j] >= max(top * 0.02, 1e-5)]
-    return [[int(ids[j]), round(float(probs[j]), 6)] for j in keep]
+    eng = manager.engine()
+    sims = mat @ eng.embed_texts([text])[0]
+    scores, keep = eng.keep_hits(sims, np.argsort(-sims)[:limit])
+    return [[int(ids[j]), round(float(scores[j]), 6)] for j in keep]
 
 
-# Похожие снимки: косинус эмбеддингов. На снимках из поездки у случайных пар медиана 0.57,
+# Похожие снимки: косинус эмбеддингов. На снимках из поездки у случайных пар SigLIP медиана 0.57,
 # тот же вид / место / человек — от ~0.72 (люки к люкам, ночной замок к ночному замку).
-SIMILAR_MIN = 0.72
+# У EmbeddingGemma косинусы выше (медиана 0.67): ту же долю пар пропускает порог 0.77.
+SIMILAR_MIN = {MODEL: 0.72, GEMMA: 0.77}
 SIMILAR_AT_LEAST = 8  # если порог прошли немногие — всё равно показать ближайшие
 
 
-def _nearest(ids: np.ndarray, mat: np.ndarray, q: np.ndarray, skip: int | None, limit: int) -> list[list]:
+def _nearest(lib, ids: np.ndarray, mat: np.ndarray, q: np.ndarray, skip: int | None, limit: int) -> list[list]:
     sims = mat @ q
     order = [int(j) for j in np.argsort(-sims)[:limit + 1] if ids[j] != skip][:limit]
-    keep = [j for i, j in enumerate(order) if sims[j] >= SIMILAR_MIN or i < SIMILAR_AT_LEAST]
+    keep = [j for i, j in enumerate(order) if sims[j] >= SIMILAR_MIN[lib.ai_model] or i < SIMILAR_AT_LEAST]
     return [[int(ids[j]), round(float(sims[j]), 4)] for j in keep]
 
 
@@ -446,7 +513,7 @@ def similar(lib, mid: int, limit: int = 300) -> list[list]:
     if not len(pos):
         raise RuntimeError("Этот снимок ещё не проанализирован — запустите анализ на странице «AI»")
     q = mat[pos[0]]
-    return _nearest(ids, mat, q / max(float(np.linalg.norm(q)), 1e-8), mid, limit)
+    return _nearest(lib, ids, mat, q / max(float(np.linalg.norm(q)), 1e-8), mid, limit)
 
 
 def similar_to_image(lib, manager: Manager, data: bytes, limit: int = 300) -> list[list]:
@@ -454,9 +521,10 @@ def similar_to_image(lib, manager: Manager, data: bytes, limit: int = 300) -> li
     ids, mat = _matrix(lib)
     if not len(ids):
         return []
+    eng = manager.engine()
     try:
-        pix = Engine.preprocess(data)
+        pix = eng.prepare(data)
     except Exception as e:  # noqa: BLE001
         raise RuntimeError("Не удалось прочитать картинку — подойдут JPEG, PNG, HEIC, WebP") from e
-    q = manager.engine().embed_images(pix[None])[0]
-    return _nearest(ids, mat, q, None, limit)
+    q = eng.embed_batch([pix])[0]
+    return _nearest(lib, ids, mat, q, None, limit)

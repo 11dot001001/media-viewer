@@ -1666,7 +1666,7 @@ async function onAction(act, el) {
     case 'unfold-all': setView('grid'); setFolded([...S.folded], false); break;
     case 'ai-install': aiCall('/api/ai/install', { model: el.dataset.model }); break;
     case 'ai-remove': {
-      const m = el.dataset.model === 'faces' ? S.aiInfo?.faces : S.aiInfo;
+      const m = el.dataset.model === 'faces' ? S.aiInfo?.faces : S.aiInfo?.models?.[el.dataset.model];
       if (await confirmModal('Удалить модель?', `<p>С диска будут удалены файлы модели (${fmtSize(m?.size)}). Результаты уже проведённого анализа останутся.</p><p class="muted">Скачать модель снова можно на этой же странице.</p>`, 'Удалить', true)) aiCall('/api/ai/remove', { model: el.dataset.model });
       break;
     }
@@ -1674,6 +1674,12 @@ async function onAction(act, el) {
     case 'ai-rate-stop': aiCall('/api/ai/rate-stop'); break;
     case 'q-cat': S.aiSel = new Set([el.dataset.key]); S.search = null; $('#aiQuery').value = ''; S.view = 'grid'; filtersChanged(); break;
     case 'ai-analyze': aiCall('/api/ai/analyze'); break;
+    case 'ai-model': {
+      if (el.dataset.model === S.aiInfo?.model) break;
+      await aiCall('/api/ai/model', { model: el.dataset.model });
+      loadItems();  // категории и красота кадра — от выбранной модели
+      break;
+    }
     case 'ai-stop': aiCall('/api/ai/stop'); break;
     case 'ai-cat': S.aiSel = new Set([el.dataset.key]); S.search = null; $('#aiQuery').value = ''; S.view = 'grid'; filtersChanged(); break;
     case 'fold-group': {
@@ -2052,7 +2058,8 @@ async function aiPoll() {
   S.aiInfo = info;
   S.ai.ready = info.packages && info.installed;
   const a = info.analysis, q = info.quality;
-  const running = info.busy || info.faces?.busy || a?.running || q?.running;
+  const models = Object.values(info.models || {});
+  const running = models.some(m => m.busy) || info.faces?.busy || a?.running || q?.running;
   if (wasRunning && !a?.running) {
     loadItems();
     if (a?.phase === 'done') toast('Анализ завершён: категории по смыслу и поиск — в панели слева');
@@ -2062,7 +2069,7 @@ async function aiPoll() {
     if (q?.phase === 'done') toast(`Оценка завершена${q.closed ? `: закрыты глаза на ${plural(q.closed, 'кадре', 'кадрах', 'кадрах')}` : ''}. ★ в сериях выбраны заново`);
     if (q?.phase === 'error') toast(esc(q.message), true, 8000);
   } else if ((a?.running || q?.running) && Date.now() - lastLoad > 8000) loadItems();
-  for (const job of [info.job, info.faces?.job]) {
+  for (const job of [...models.map(m => m.job), info.faces?.job]) {
     if (job?.phase === 'error' && aiPoll.shownErr !== job.message) {
       aiPoll.shownErr = job.message;
       toast(esc(job.message), true, 10000);
@@ -2169,6 +2176,34 @@ function jobBlock(a, ready, startAct, stopAct, verb, what) {
     ${a.phase === 'error' ? `<p class="err-text">${esc(a.message)}</p>` : ''}`;
 }
 
+/** Модели по смыслу на выбор (ключи — как в ai.SEMANTIC). */
+const SEMANTIC_MODELS = {
+  'siglip2-base-224': {
+    title: 'SigLIP 2', speed: '≈ 400 снимков/с',
+    hint: 'Быстрая, работает на любой видеокарте и даже без неё.',
+  },
+  'embeddinggemma-2': {
+    title: 'EmbeddingGemma 2', speed: '≈ 30 снимков/с',
+    hint: 'Чуть лучше понимает запросы на русском, но в 10 раз медленнее и только с видеокартой NVIDIA (CUDA).',
+  },
+};
+
+/** Выбор модели по смыслу: у каждой свой анализ, при переключении ничего не теряется. */
+function modelPicker(info) {
+  const a = info.analysis, locked = a?.running;
+  const opts = Object.entries(info.models || {}).map(([key, m]) => {
+    const d = SEMANTIC_MODELS[key] || { title: key, speed: '', hint: '' };
+    const done = a?.per_model?.[key] || 0;
+    const state = m.busy ? 'установка…' : m.packages && m.installed ? 'скачана' : 'не скачана';
+    return `<button class="ai-model${key === info.model ? ' on' : ''}" data-act="ai-model" data-model="${key}" ${locked ? 'disabled title="Дождитесь окончания анализа"' : ''}>
+      <span class="ai-model-head"><span class="radio"></span><b>${d.title}</b><span class="ai-model-speed">${d.speed}</span></span>
+      <span class="ai-model-hint">${d.hint}</span>
+      <span class="ai-model-state">${state}${S.root && done ? ` · размечено ${done}` : ''}</span>
+    </button>`;
+  }).join('');
+  return `<div class="ai-models">${opts}</div>`;
+}
+
 function renderAI() {
   const el = $('#view-ai');
   const info = S.aiInfo;
@@ -2179,8 +2214,11 @@ function renderAI() {
   const a = info.analysis;
   const pillOf = m => (m.busy ? '<span class="pill">Установка…</span>' : m.packages && m.installed ? '<span class="pill ok">Установлена</span>' : '<span class="pill">Не установлена</span>');
 
-  // 1. Модель SigLIP
-  const model = modelBlock(info, 'siglip2-base-224', `Скачивается один раз: модель (≈ ${fmtSize(info.download_size)}) и ONNX Runtime для расчётов на видеокарте.`);
+  // 1. Модель по смыслу: выбор и скачивание выбранной
+  const gemma = info.model === 'embeddinggemma-2';
+  const model = modelBlock(info, info.model, gemma
+    ? `Скачивается один раз: модель и ONNX Runtime с библиотеками CUDA, всего ≈ ${fmtSize(info.download_size)}. Нужна видеокарта NVIDIA: без неё анализ займёт часы.`
+    : `Скачивается один раз: модель (≈ ${fmtSize(info.download_size)}) и ONNX Runtime для расчётов на видеокарте.`);
   const pill = pillOf(info);
 
   // 2. Анализ папки
@@ -2211,15 +2249,16 @@ function renderAI() {
 
   el.innerHTML = `<div class="list-head"><h2>AI</h2><span class="sub">Нейросеть работает на этом компьютере: снимки никуда не отправляются</span></div>
     <div class="ai-grid">
-      <div class="card ai-card"><div class="card-head"><span class="t">Модель SigLIP 2</span>${pill}</div>
-        <p class="muted">Понимает, что на снимке: раскладывает снимки по категориям и ищет по описанию на русском и английском.</p>${model}</div>
+      <div class="card ai-card"><div class="card-head"><span class="t">Модель по смыслу</span>${pill}</div>
+        <p class="muted">Понимает, что на снимке: раскладывает снимки по категориям, ищет по описанию на русском и английском и оценивает красоту кадра.</p>
+        ${modelPicker(info)}${model}</div>
       <div class="card ai-card"><div class="card-head"><span class="t">Анализ папки</span>${S.root ? `<span class="sub" title="${esc(S.root)}">${esc(S.root.split(/[\\/]/).filter(Boolean).pop())}</span>` : ''}</div>
-        <p class="muted">Модель смотрит на миниатюры из индекса, сами файлы не читаются. Снимки, добавленные позже, анализируются этой же кнопкой.</p>${analysis}</div>
+        <p class="muted">Модель смотрит на миниатюры из индекса, сами файлы не читаются. Снимки, добавленные позже, анализируются этой же кнопкой. Результаты каждой модели хранятся отдельно: при обратном переключении пересчитывать ничего не нужно.</p>${analysis}</div>
       <div class="card ai-card wide"><div class="card-head"><span class="t">Категории по смыслу</span></div>
         ${cats ? `<div class="ai-chips">${cats}</div><p class="muted">Клик — показать в ленте. Поиск по описанию — в панели слева, раздел «По смыслу».</p>`
           : '<p class="muted">Появятся после анализа: люди, животные, еда, природа, город, транспорт, документы и чеки, экраны, мемы, случайные кадры.</p>'}</div>
       <div class="card ai-card wide"><div class="card-head"><span class="t">Оценка кадра</span>${pillOf(f)}</div>
-        <p class="muted">Находит лица и проверяет, не закрыты ли глаза и не смазаны ли лица. Вместе с красотой кадра по SigLIP это решает, какой кадр серии отметить ★. Для снимков с людьми читается оригинал, остальные оцениваются по миниатюре.</p>
+        <p class="muted">Находит лица и проверяет, не закрыты ли глаза и не смазаны ли лица. Вместе с красотой кадра от модели по смыслу это решает, какой кадр серии отметить ★. Для снимков с людьми читается оригинал, остальные оцениваются по миниатюре.</p>
         ${modelBlock(f, 'faces', `Скачиваются две маленькие модели лиц (≈ ${fmtSize(f.download_size)}): YuNet и MediaPipe Face Mesh.${f.packages ? '' : ' Если ONNX Runtime ещё не установлен, он поставится вместе с ними.'}`)}
         ${rate}</div>
     </div>`;

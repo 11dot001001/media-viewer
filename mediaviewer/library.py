@@ -12,7 +12,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import grouping, media, trash
+from . import ai, grouping, media, trash
 from .classify import classify
 from .journal import Journal
 
@@ -52,7 +52,8 @@ CREATE INDEX IF NOT EXISTS ix_parent ON media(parent_id);
 CREATE INDEX IF NOT EXISTS ix_size ON media(size);
 CREATE TABLE IF NOT EXISTS thumbs(id INTEGER PRIMARY KEY, data BLOB);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS ai(id INTEGER PRIMARY KEY, model TEXT, mtime REAL, emb BLOB, label TEXT, score REAL, aes REAL);
+CREATE TABLE IF NOT EXISTS ai(id INTEGER, model TEXT, mtime REAL, emb BLOB, label TEXT, score REAL, aes REAL,
+  PRIMARY KEY(id, model));
 CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY, version INTEGER, mtime REAL, faces INTEGER, closed INTEGER,
   eyes REAL, face_sharp REAL);
 """
@@ -102,6 +103,7 @@ class Library:
         self.analyzer = None  # ai.Analyzer: анализ нейросетью, запускается со страницы «AI»
         self.rater = None  # quality.Rater: оценка кадров (глаза, резкость лиц), запускается со страницы «AI»
         self.ai_version = 0  # растёт при каждой записи в таблицу ai (сбрасывает кэш поиска)
+        self.ai_model = ai.active_model(data_dir)  # чьи категории, красоту и поиск показываем (выбор на странице «AI»)
         self._offline: set[str] = set()  # файлы, которые лежат только в облаке (см. CLOUD_ONLY_ATTRS)
         self.status = {"phase": "idle", "total": 0, "done": 0, "message": "", "errors": 0, "started": 0, "version": 0,
                        "folder_size": None, "folder_files": None, "cloud": 0}
@@ -112,8 +114,15 @@ class Library:
                              ("cloud", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in cols:  # индекс от прошлой версии
                     c.execute(f"ALTER TABLE media ADD COLUMN {col} {typ}")
-            if "aes" not in {r["name"] for r in c.execute("PRAGMA table_info(ai)")}:
+            ai_cols = {r["name"]: r["pk"] for r in c.execute("PRAGMA table_info(ai)")}
+            if "aes" not in ai_cols:
                 c.execute("ALTER TABLE ai ADD COLUMN aes REAL")
+            if not ai_cols.get("model"):  # раньше хранилась одна модель на снимок — теперь у каждой модели свои строки
+                c.executescript("""ALTER TABLE ai RENAME TO ai_old;
+                    CREATE TABLE ai(id INTEGER, model TEXT, mtime REAL, emb BLOB, label TEXT, score REAL, aes REAL,
+                      PRIMARY KEY(id, model));
+                    INSERT INTO ai SELECT id, model, mtime, emb, label, score, aes FROM ai_old;
+                    DROP TABLE ai_old;""")
             for row in c.execute("SELECT key, value FROM settings WHERE key IN ('folder_size', 'folder_files')"):
                 self.status[row["key"]] = int(row["value"])
 
@@ -422,8 +431,8 @@ class Library:
                     """SELECT m.id, path, kind, category, ts, phash, dhash, sha1, size, width, height, sharpness, make,
                        m.model AS model, a.aes AS q_aes, q.faces AS q_faces, q.closed AS q_closed, q.eyes AS q_eyes,
                        q.face_sharp AS q_face_sharp
-                       FROM media m LEFT JOIN ai a ON a.id = m.id LEFT JOIN quality q ON q.id = m.id
-                       WHERE parent_id IS NULL AND analyzed=1""")]
+                       FROM media m LEFT JOIN ai a ON a.id = m.id AND a.model = ? LEFT JOIN quality q ON q.id = m.id
+                       WHERE parent_id IS NULL AND analyzed=1""", (self.ai_model,))]
                 res = grouping.compute(rows, self.settings())
                 c.execute("UPDATE media SET series_id=NULL, series_best=0, dup_id=NULL, dup_best=0, dup_exact=0")
                 c.executemany("UPDATE media SET series_id=?, series_best=? WHERE id=?",
@@ -444,13 +453,13 @@ class Library:
             found = self.finder.found if self.finder is not None else None
             # Пока идёт сканирование, необработанные файлы не показываем: у них ещё нет ни даты, ни миниатюры
             for r in c.execute(
-                    """SELECT id, path, kind, ext, size, media.mtime AS mtime, width, height, ts, ts_source, media.model AS model, lat, lon, duration,
+                    """SELECT media.id AS id, path, kind, ext, size, media.mtime AS mtime, width, height, ts, ts_source, media.model AS model, lat, lon, duration,
                        sharpness, category, status, series_id, series_best, dup_id, dup_best, dup_exact, error,
                        match, match_ref, match_strong, cloud, ai.label AS ai, ai.aes AS aes,
                        quality.faces AS q_faces, quality.closed AS q_closed
-                       FROM media LEFT JOIN ai USING(id) LEFT JOIN quality USING(id)
+                       FROM media LEFT JOIN ai ON ai.id = media.id AND ai.model = ? LEFT JOIN quality ON quality.id = media.id
                        WHERE parent_id IS NULL AND (analyzed=1 OR ?) ORDER BY ts, path""",
-                    (not self.scanning,)):
+                    (self.ai_model, not self.scanning)):
                 kids = extra.get(r["id"], [])
                 cx = []
                 for k in kids:
@@ -484,8 +493,9 @@ class Library:
             d = dict(r)
             d["abs_path"] = str(self.root / r["path"]) if self.kind == "folder" else f"{self.title}: {r['path']}"
             d["children"] = [dict(k) for k in c.execute("SELECT id, path, ext, size FROM media WHERE parent_id=?", (mid,))]
-            q = c.execute("""SELECT a.aes, q.faces, q.closed, q.eyes, q.face_sharp FROM media m LEFT JOIN ai a ON a.id = m.id
-                             LEFT JOIN quality q ON q.id = m.id WHERE m.id=?""", (mid,)).fetchone()
+            q = c.execute("""SELECT a.aes, q.faces, q.closed, q.eyes, q.face_sharp FROM media m
+                             LEFT JOIN ai a ON a.id = m.id AND a.model = ? LEFT JOIN quality q ON q.id = m.id
+                             WHERE m.id=?""", (self.ai_model, mid)).fetchone()
             d["quality"] = dict(q) if q and any(v is not None for v in q) else None
             d.pop("phash", None)
             d.pop("dhash", None)
