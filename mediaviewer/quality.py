@@ -1,4 +1,5 @@
-"""Оценка кадра: закрытые глаза и резкость лиц. Вместе с красотой кадра (SigLIP) помогает выбрать ★ в серии.
+"""Оценка кадра: закрытые глаза и резкость лиц. Вместе с красотой кадра помогает выбрать ★ в серии.
+Заодно для каждого лица считается отпечаток (SFace) — по ним страница «Люди» группирует лица (people.py).
 
 Лица ищутся на миниатюре. Только если они есть, открывается оригинал (до 1600 px): на миниатюре глаз не разглядеть.
 Не скачанные из облака файлы и снимки с телефона оцениваются по миниатюре.
@@ -15,10 +16,10 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import numpy as np
 from PIL import Image
 
-from . import media
+from . import media, people
 from .faces import MIN_FACE
 
-VERSION = 2  # при изменении способа оценки — поднять, и снимки оценятся заново
+VERSION = 3  # при изменении способа оценки — поднять, и снимки оценятся заново (3 — отпечатки лиц)
 # Отношение высоты глаза к ширине (EAR) у более открытого глаза. Подобрано по снимкам из поездки:
 # открытые глаза ≈ 0.22–0.30, прищур и взгляд вниз ≈ 0.10–0.15, закрытые — меньше 0.10.
 CLOSED_EAR = 0.11
@@ -67,11 +68,17 @@ class Rater:
         self.status.update(phase="stopped" if self._cancel.is_set() else "done",
                            message="Остановлено" if self._cancel.is_set() else "Готово")
         self.lib.regroup()  # ★ в сериях выбираются с учётом глаз
+        if self.manager.engine().rec is not None:
+            self.status["message"] = "Группировка лиц…"
+            people.recluster(self.lib)
+            self.status["message"] = "Остановлено" if self._cancel.is_set() else "Готово"
+            self.lib.status["version"] += 1
 
     def _run(self) -> None:
         fm = self.manager.engine()
         with self.lib.connect() as c:
             c.execute("DELETE FROM quality WHERE id NOT IN (SELECT id FROM media WHERE parent_id IS NULL)")
+            c.execute("DELETE FROM faces WHERE media_id NOT IN (SELECT id FROM media WHERE parent_id IS NULL)")
             # Сначала кадры серий: там оценка нужнее всего
             todo = [tuple(r) for r in c.execute(
                 """SELECT m.id, m.path, m.ext, m.mtime, m.cloud FROM media m JOIN thumbs t ON t.id = m.id
@@ -102,16 +109,20 @@ class Rater:
             pool.shutdown(wait=False, cancel_futures=True)
 
     def _save(self, c, finished) -> None:
-        rows = [(t[0], VERSION, t[3], *r) for t, r in (f.result() for f in finished) if r is not None]
+        done = [(t, r) for t, r in (f.result() for f in finished) if r is not None]
         c.executemany("""INSERT OR REPLACE INTO quality(id, version, mtime, faces, closed, eyes, face_sharp)
-                         VALUES(?, ?, ?, ?, ?, ?, ?)""", rows)
+                         VALUES(?, ?, ?, ?, ?, ?, ?)""", [(t[0], VERSION, t[3], *r[0]) for t, r in done])
+        for t, (_, found) in done:
+            if found is not None:
+                _save_faces(c, t[0], found)
         c.commit()
         self.status["done"] += len(finished)
 
     def _rate(self, fm, item: tuple, thumb: bytes | None) -> tuple[tuple, tuple | None]:
         return item, self._rate_one(fm, item, thumb)
 
-    def _rate_one(self, fm, item: tuple, thumb: bytes | None) -> tuple | None:
+    def _rate_one(self, fm, item: tuple, thumb: bytes | None) -> tuple[tuple, list | None] | None:
+        """(faces, closed, eyes, face_sharp) и лица для «Людей»: [(x, y, w, h в долях кадра, отпечаток)]."""
         mid, rel, ext, _, cloud = item
         if not thumb:
             return None
@@ -129,12 +140,35 @@ class Rater:
         min_face = MIN_FACE * max(img.size) / ORIGINAL_SIDE  # на миниатюре порог меньше
         found = sorted((f for f in found if max(f["box"][2:]) >= min_face), key=lambda f: -max(f["box"][2:]))
         found = [f for f in found if max(f["box"][2:]) >= MAIN_FACE * max(found[0]["box"][2:])]
-        eyes = [e for e in (fm.eyes(img, f) for f in found[:MAX_FACES]) if e is not None]
-        if not eyes:
-            return 0, 0, None, None
-        opened = [max(e["ear"]) for e in eyes]
-        return (len(eyes), sum(o < CLOSED_EAR for o in opened),
-                float(np.mean([min(1.0, o / OPEN_EAR) for o in opened])), float(np.mean([e["sharp"] for e in eyes])))
+        checked = [(f, fm.eyes(img, f)) for f in found[:MAX_FACES]]
+        checked = [(f, e) for f, e in checked if e is not None]  # Face Mesh не нашёл лица — ложное срабатывание
+        known = None
+        if fm.rec is not None:
+            w, h = img.size
+            known = [(f["box"][0] / w, f["box"][1] / h, f["box"][2] / w, f["box"][3] / h, fm.embed(img, f))
+                     for f, _ in checked if max(f["box"][2:]) >= people.REC_MIN]
+        if not checked:
+            return (0, 0, None, None), known
+        opened = [max(e["ear"]) for _, e in checked]
+        return ((len(checked), sum(o < CLOSED_EAR for o in opened), float(np.mean([min(1.0, o / OPEN_EAR) for o in opened])),
+                 float(np.mean([e["sharp"] for _, e in checked]))), known)
+
+
+def _save_faces(c, mid: int, found: list) -> None:
+    """Заменить лица снимка. Решения человека («это Маша», «это не она») переходят к тем же лицам на новом месте."""
+    old = c.execute("SELECT x, y, w, h, person FROM faces WHERE media_id = ? AND person IS NOT NULL", (mid,)).fetchall()
+    c.execute("DELETE FROM faces WHERE media_id = ?", (mid,))
+    for x, y, w, h, emb in found:
+        person = next((o[4] for o in old if _iou((x, y, w, h), o[:4]) > 0.5), None)
+        c.execute("INSERT INTO faces(media_id, x, y, w, h, emb, person) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                  (mid, x, y, w, h, emb.astype(np.float16).tobytes(), person))
+
+
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    return inter / max(a[2] * a[3] + b[2] * b[3] - inter, 1e-9)
 
 
 def counts(lib) -> dict:

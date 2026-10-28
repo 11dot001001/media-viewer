@@ -38,6 +38,7 @@
   <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M2 14h4"/><path d="M10 8h4"/><path d="M18 16h4"/></symbol>
   <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M9.94 15.5A2 2 0 0 0 8.5 14.06l-6.14-1.58a.5.5 0 0 1 0-.96L8.5 9.94A2 2 0 0 0 9.94 8.5l1.58-6.14a.5.5 0 0 1 .96 0L14.06 8.5A2 2 0 0 0 15.5 9.94l6.14 1.58a.5.5 0 0 1 0 .96L15.5 14.06a2 2 0 0 0-1.44 1.44l-1.58 6.14a.5.5 0 0 1-.96 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/></symbol>
   <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="m2 2 20 20"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
   <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></symbol>
   <symbol id="i-broom" viewBox="0 0 24 24"><path d="m16 22-1-4"/><path d="M19 13.99a1 1 0 0 0 1-1V12a2 2 0 0 0-2-2h-3a1 1 0 0 1-1-1V4a2 2 0 0 0-4 0v5a1 1 0 0 1-1 1H6a2 2 0 0 0-2 2v.99a1 1 0 0 0 1 1"/><path d="M5 14h14l1.973 6.767A1 1 0 0 1 20 22H4a1 1 0 0 1-.973-1.233z"/><path d="m8 22 1-4"/></symbol>
   <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
@@ -81,6 +82,7 @@
         <button data-view="series"><svg class="i"><use href="#i-layers"/></svg>Серии<span class="cnt" id="cnt-series"></span></button>
         <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
         <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
+        <button data-view="people" title="Снимки по людям: лица группируются сами, имена даёте вы"><svg class="i"><use href="#i-users"/></svg>Люди<span class="cnt" id="cnt-people"></span></button>
         <button data-view="stats"><svg class="i"><use href="#i-chart"/></svg>Статистика<span class="cnt" id="cnt-stats"></span></button>
         <button data-view="clean" title="Подсказки: что, скорее всего, можно удалить"><svg class="i"><use href="#i-broom"/></svg>Можно удалить<span class="cnt" id="cnt-clean"></span></button>
         <button data-view="trash"><svg class="i"><use href="#i-trash"/></svg>Корзина отбора<span class="cnt" id="cnt-trash"></span></button>
@@ -114,6 +116,11 @@
           <div id="aiCats" class="chips"></div>
           <div id="qCats" class="chips q-chips"></div>
         </div>
+      </section>
+
+      <section id="peopleSec" class="sb-group hidden" data-group="people">
+        <button class="sb-head" data-act="fold-group" data-fold-group="people"><svg class="i"><use href="#i-users"/></svg>Кто на снимке<span class="sb-val" id="peopleVal"></span><i class="chev"></i></button>
+        <div class="sb-body"><div id="peopleChips" class="chips"></div></div>
       </section>
 
       <section class="sb-group" data-group="status">
@@ -227,6 +234,7 @@
     <div id="view-ai" class="view hidden"></div>
     <div id="view-stats" class="view hidden"></div>
     <div id="view-clean" class="view hidden"></div>
+    <div id="view-people" class="view hidden"></div>
   </main>
 </div>
 

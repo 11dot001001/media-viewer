@@ -996,3 +996,33 @@ body.tiles-tiny #view-trash .ph-inset i { display: none; }
 }
 .drop-hint svg.i { width: 28px; height: 28px; color: #a5adff; }
 .drop-hint b { font-size: 16px; color: var(--text); }
+
+/* ---------- люди */
+.pp-h { margin: 18px 0 10px; font-size: 14px; font-weight: 650; color: var(--text-2); }
+.pp-h .cnt { color: var(--muted); font-weight: 500; margin-left: 4px; }
+.pp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.pp-card {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 10px 10px;
+  background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.pp-face { width: 104px; height: 104px; padding: 0; border: 0; border-radius: 50%; overflow: hidden; cursor: pointer;
+  background: var(--surface-3); box-shadow: 0 0 0 2px var(--line-2); transition: box-shadow .15s, transform .15s var(--ease); }
+.pp-face:hover { box-shadow: 0 0 0 2px var(--accent); transform: scale(1.03); }
+.pp-face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pp-name {
+  width: 100%; text-align: center; font: inherit; font-weight: 600; color: var(--text); background: transparent;
+  border: 1px solid transparent; border-radius: var(--radius-sm); padding: 4px 6px;
+}
+.pp-name:hover { border-color: var(--line-2); }
+.pp-name:focus { outline: none; border-color: var(--accent); background: var(--surface-2); }
+.pp-name::placeholder { color: var(--muted); font-weight: 500; }
+.pp-count { font-size: 12px; color: var(--muted); }
+.pp-acts { display: flex; gap: 12px; font-size: 12px; }
+.pp-foot { margin-top: 16px; }
+.pp-faces { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; max-height: 60vh; overflow: auto; }
+.pp-f { position: relative; padding: 0; border: 2px solid transparent; border-radius: 10px; overflow: hidden; cursor: pointer; background: var(--surface-3); aspect-ratio: 1; }
+.pp-f img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pp-f.on { border-color: var(--reject); }
+.pp-f.on::after { content: "✕"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 22px; font-weight: 700;
+  color: #fff; background: rgba(255, 95, 115, .45); }
+.pp-start { max-width: 640px; }

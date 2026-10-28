@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
-from . import ai, gemma, matching, media, quality, trash
+from . import ai, gemma, matching, media, people, quality, trash
 from .journal import Journal
 from .library import Library
 from .phone import FolderDevice, PhoneLibrary, WpdDevice
@@ -504,3 +504,68 @@ async def ai_similar_image(request: Request):
         return {"hits": await run_in_threadpool(ai.similar_to_image, lib(), semantic(), data)}
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
+
+
+# ---------------------------------------------------------------- люди (страница «Люди»)
+
+def _people_job_check() -> None:
+    lb = lib()
+    if lb.rater is not None and lb.rater.running:
+        raise HTTPException(409, "Дождитесь окончания оценки кадров")
+
+
+@app.get("/api/people")
+def people_list():
+    return people.groups(lib())
+
+
+@app.get("/api/people/faces/{key}")
+def people_faces(key: str):
+    return {"faces": people.face_list(lib(), key)}
+
+
+class PersonReq(BaseModel):
+    key: str
+    name: str | None = None
+
+
+@app.post("/api/people/name")
+def people_name(req: PersonReq):
+    _people_job_check()
+    if not (req.name or "").strip():
+        raise HTTPException(400, "Пустое имя")
+    people.set_name(lib(), req.key, req.name)
+    return people.groups(lib())
+
+
+@app.post("/api/people/hide")
+def people_hide(req: PersonReq):
+    _people_job_check()
+    people.hide(lib(), req.key)
+    return people.groups(lib())
+
+
+@app.post("/api/people/unhide")
+def people_unhide():
+    _people_job_check()
+    people.unhide_all(lib())
+    return people.groups(lib())
+
+
+class FacesReq(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/people/exclude")
+def people_exclude(req: FacesReq):
+    _people_job_check()
+    people.exclude(lib(), req.ids)
+    return people.groups(lib())
+
+
+@app.get("/api/face/{fid}")
+def face(fid: int):
+    data = people.face_crop(lib(), fid)
+    if data is None:
+        return Response(NO_THUMB, media_type="image/svg+xml", headers={"Cache-Control": "no-store"})
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})

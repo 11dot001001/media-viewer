@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS ai(id INTEGER, model TEXT, mtime REAL, emb BLOB, labe
   PRIMARY KEY(id, model));
 CREATE TABLE IF NOT EXISTS quality(id INTEGER PRIMARY KEY, version INTEGER, mtime REAL, faces INTEGER, closed INTEGER,
   eyes REAL, face_sharp REAL);
+CREATE TABLE IF NOT EXISTS faces(id INTEGER PRIMARY KEY AUTOINCREMENT, media_id INTEGER, x REAL, y REAL, w REAL, h REAL, emb BLOB,
+  person INTEGER, cluster INTEGER, who INTEGER);
+CREATE INDEX IF NOT EXISTS ix_faces_media ON faces(media_id);
+CREATE INDEX IF NOT EXISTS ix_faces_cluster ON faces(cluster);
+CREATE TABLE IF NOT EXISTS persons(id INTEGER PRIMARY KEY, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
 """
 
 STATUS_NONE, STATUS_KEEP, STATUS_REJECT = 0, 1, 2
@@ -451,6 +456,10 @@ class Library:
                 extra[r["parent_id"]].append(r)
             out = []
             found = self.finder.found if self.finder is not None else None
+            who: dict[int, list[int]] = defaultdict(list)  # кто на снимке (люди с именами со страницы «Люди»)
+            for r in c.execute("""SELECT DISTINCT f.media_id, f.who FROM faces f JOIN persons p ON p.id = f.who
+                                  WHERE p.name IS NOT NULL AND p.hidden = 0"""):
+                who[r[0]].append(r[1])
             # Пока идёт сканирование, необработанные файлы не показываем: у них ещё нет ни даты, ни миниатюры
             for r in c.execute(
                     """SELECT media.id AS id, path, kind, ext, size, media.mtime AS mtime, width, height, ts, ts_source, media.model AS model, lat, lon, duration,
@@ -479,6 +488,7 @@ class Library:
                     "v": int(r["mtime"] or 0), "err": r["error"], "cl": r["cloud"],
                     "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"], "ai": r["ai"],
                     "qa": None if r["aes"] is None else round(r["aes"], 3), "qf": r["q_faces"], "qc": r["q_closed"],
+                    "pp": who.get(r["id"]),
                     "ph": (None if not found or r["id"] not in found else
                            (found[r["id"]] or (-1 if r["id"] in self.finder.mismatch else
                                                -2 if r["id"] in self.finder.unreadable else 0))),

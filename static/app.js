@@ -129,6 +129,8 @@ const S = {
   ai: { ready: false, labels: [] },  // нейросеть: установлена ли модель, список смысловых категорий
   aiInfo: null,  // состояние страницы «AI» (/api/ai)
   aiSel: new Set(),  // выбранные смысловые категории (пусто — без фильтра)
+  people: null,  // страница «Люди» (/api/people): группы лиц
+  peopleSel: new Set(),  // фильтр «Кто на снимке»: id людей, все должны быть на снимке
   search: null,  // { q, rank: Map(id → место в выдаче), title? } — поиск по описанию или «похожие на…»
   cleanOpen: new Set(),  // «Можно удалить»: развёрнутые группы
 };
@@ -258,6 +260,7 @@ async function loadItems() {
   for (const id of [...S.selected]) if (!S.byId.has(id)) S.selected.delete(id);
   if (S.focus && !S.byId.has(S.focus)) S.focus = null;
   mapDirty = true;
+  if (items.some(i => i.qf > 0)) loadPeople(); else S.people = null;
   renderCats();
   render();
   loadCost = Date.now() - lastLoad;
@@ -274,6 +277,7 @@ async function loadItems() {
 function passFilters(it, useStatus = true, useDates = true) {
   if (S.types.size && !S.types.has(it.c)) return false;
   if (S.aiSel.size && ![...S.aiSel].some(k => aiMatch(it, k))) return false;
+  if (S.peopleSel.size && ![...S.peopleSel].every(p => it.pp?.includes(p))) return false;
   if (S.search && !S.search.rank.has(it.id)) return false;
   if (S.match && (it.m || 'new') !== S.match) return false;
   if (useStatus && S.status !== 'all' && it.st !== +S.status) return false;
@@ -345,6 +349,7 @@ function updateCounts() {
   set('dups', new Set(base.filter(i => i.d).map(i => i.d)).size);
   set('map', base.filter(i => i.lat != null).length);
   set('clean', cleanSections().reduce((n, sec) => n + sec.items.length, 0));
+  set('people', S.people?.groups.length);
   const tr = S.items.filter(i => i.st === 2).length;
   set('trash', tr);
   $('#trashCount').textContent = tr;
@@ -606,7 +611,7 @@ function calShift(dir) {
 
 /** Сколько фильтров включено — для заголовка «Фильтры» и кнопки «Сбросить». */
 function renderFilterSummary() {
-  const n = (S.types.size ? 1 : 0) + (S.aiSel.size ? 1 : 0) + (S.status !== 'all' ? 1 : 0) + (S.from || S.to ? 1 : 0)
+  const n = (S.types.size ? 1 : 0) + (S.aiSel.size ? 1 : 0) + (S.peopleSel.size ? 1 : 0) + (S.status !== 'all' ? 1 : 0) + (S.from || S.to ? 1 : 0)
     + (S.search ? 1 : 0) + (S.match ? 1 : 0);
   $('#fltCount').textContent = n;
   $('#fltCount').classList.toggle('hidden', !n);
@@ -620,7 +625,7 @@ function renderFilterSummary() {
 }
 
 function resetFilters() {
-  S.types.clear(); S.aiSel.clear(); S.status = 'all'; S.from = S.to = ''; S.match = null; S.search = null;
+  S.types.clear(); S.aiSel.clear(); S.peopleSel.clear(); S.status = 'all'; S.from = S.to = ''; S.match = null; S.search = null;
   CAL.anchor = null;
   $('#aiQuery').value = '';
   filtersChanged();
@@ -629,6 +634,7 @@ function resetFilters() {
 function renderCats() {
   renderMatch();
   renderAiSide();
+  renderPeopleSide();
   renderPeriod();
   const counts = {};
   for (const it of S.items) counts[it.c] = (counts[it.c] || 0) + 1;
@@ -656,7 +662,7 @@ function render() {
   if (S.view === 'ai') { if (!S.root) showWelcome(false); renderAI(); return; }
   if (!S.root) { showWelcome(true); return; }
   // stats.js подключается отдельным файлом после app.js — обращаемся к нему только при отрисовке
-  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats(), clean: renderClean })[S.view]();
+  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats(), clean: renderClean, people: renderPeople })[S.view]();
 }
 
 function tileHTML(it, o = {}) {
@@ -1659,6 +1665,10 @@ async function onAction(act, el) {
     case 'trash-empty': emptyTrash(); break;
     case 'phone-find': phoneFind(); break;
     case 'stats-more': statsModal(); break;
+    case 'pp-open': openPerson(el.dataset.key); break;
+    case 'pp-faces': personFaces(el.dataset.key); break;
+    case 'pp-hide': peopleCall('/api/people/hide', { key: el.dataset.key }); break;
+    case 'pp-unhide': peopleCall('/api/people/unhide'); break;
     case 'phone-find-all': phoneFind(true); break;
     case 'phone-find-wide': phoneFind(false, true); break;
     case 'fold': setFolded([el.dataset.key], !S.folded.has(el.dataset.key)); break;
@@ -2076,9 +2086,11 @@ async function aiPoll() {
     }
   }
   if (S.view === 'ai' && changed) renderAI();  // без изменений не перерисовываем: иначе сбивается наведение на кнопки
+  const peopleWait = S.view === 'people' && !S.people?.faces;  // «Люди» до первой оценки показывают её ход
+  if (peopleWait && changed) renderPeople();
   const job = a?.running ? a : q?.running ? q : null;
   $('#cnt-ai').textContent = job && job.total ? Math.floor(job.done / job.total * 100) + ' %' : running ? '…' : '';
-  if (running || S.view === 'ai') aiTimer = setTimeout(aiPoll, running ? 800 : 3000);
+  if (running || S.view === 'ai' || peopleWait) aiTimer = setTimeout(aiPoll, running ? 800 : 3000);
 }
 
 // Запрос похож на имя файла (цифры, IMG_1234, DSC…): по смыслу такое не ищем, иначе в выдаче сотни случайных снимков
@@ -2258,10 +2270,118 @@ function renderAI() {
         ${cats ? `<div class="ai-chips">${cats}</div><p class="muted">Клик — показать в ленте. Поиск по описанию — в панели слева, раздел «По смыслу».</p>`
           : '<p class="muted">Появятся после анализа: люди, животные, еда, природа, город, транспорт, документы и чеки, экраны, мемы, случайные кадры.</p>'}</div>
       <div class="card ai-card wide"><div class="card-head"><span class="t">Оценка кадра</span>${pillOf(f)}</div>
-        <p class="muted">Находит лица и проверяет, не закрыты ли глаза и не смазаны ли лица. Вместе с красотой кадра от модели по смыслу это решает, какой кадр серии отметить ★. Для снимков с людьми читается оригинал, остальные оцениваются по миниатюре.</p>
-        ${modelBlock(f, 'faces', `Скачиваются две маленькие модели лиц (≈ ${fmtSize(f.download_size)}): YuNet и MediaPipe Face Mesh.${f.packages ? '' : ' Если ONNX Runtime ещё не установлен, он поставится вместе с ними.'}`)}
+        <p class="muted">Находит лица и проверяет, не закрыты ли глаза и не смазаны ли лица. Вместе с красотой кадра от модели по смыслу это решает, какой кадр серии отметить ★. Заодно запоминает, чьё это лицо, — для страницы «Люди». Для снимков с людьми читается оригинал, остальные оцениваются по миниатюре.</p>
+        ${modelBlock(f, 'faces', `Скачиваются три небольшие модели лиц (≈ ${fmtSize(f.download_size)}): YuNet, MediaPipe Face Mesh и SFace для узнавания людей.${f.packages ? '' : ' Если ONNX Runtime ещё не установлен, он поставится вместе с ними.'}`)}
         ${rate}</div>
     </div>`;
+}
+
+// ============================================================ люди
+/** Группы лиц с сервера. Имена нужны и фильтру слева, поэтому грузим вместе со списком снимков. */
+async function loadPeople() {
+  try { S.people = await api('/api/people'); } catch { return; }
+  renderPeopleSide();
+  if (S.view === 'people') renderPeople();
+}
+
+/** Правка на странице «Люди»: ответ — новый список групп; имена на плитках и в фильтре — из списка снимков. */
+async function peopleCall(url, body = {}) {
+  try { S.people = await api(url, body); } catch (e) { toast(esc(e.message), true); return; }
+  for (const id of [...S.peopleSel]) if (!S.people.groups.some(g => g.person === id && g.name)) S.peopleSel.delete(id);
+  renderPeople();
+  loadItems();
+}
+
+const PEOPLE_TOP = 8;
+
+/** Фильтр «Кто на снимке» в левой панели: люди с именами, частые сверху. */
+function renderPeopleSide() {
+  const named = (S.people?.groups || []).filter(g => g.name);
+  $('#peopleSec').classList.toggle('hidden', !named.length);
+  if (!named.length) return;
+  const shown = named.filter((g, i) => i < PEOPLE_TOP || S.peopleSel.has(g.person));
+  $('#peopleChips').innerHTML = shown.map(g => chipHTML(g.person, 'data-person', esc(g.name), { emoji: '🙂' }, g.ids.length,
+    S.peopleSel.has(g.person), 'Клик — снимки с этим человеком. Несколько — снимки, где они вместе')).join('');
+  const sel = named.filter(g => S.peopleSel.has(g.person)).map(g => g.name);
+  $('#peopleVal').textContent = sel.length === 1 ? sel[0] : sel.length ? `вместе: ${sel.length}` : '';
+}
+
+/** Открыть человека в ленте: с именем — фильтром слева, без имени — как результат поиска. */
+function openPerson(key) {
+  const g = S.people?.groups.find(x => x.key === key);
+  if (!g) return;
+  if (g.name) {
+    S.peopleSel = new Set([g.person]);
+    S.search = null;
+    $('#aiQuery').value = '';
+    S.view = 'grid';
+    filtersChanged();
+  } else showFound(g.ids, 'Человек без имени');
+}
+
+function personCard(g) {
+  return `<div class="pp-card">
+    <button class="pp-face" data-act="pp-open" data-key="${g.key}" title="Показать снимки"><img src="/api/face/${g.cover}" alt="" loading="lazy"></button>
+    <input class="pp-name" data-key="${g.key}" value="${esc(g.name || '')}" placeholder="Кто это?" list="ppNames" spellcheck="false"
+      title="Имя. Если вписать имя, которое уже есть, группы склеятся">
+    <span class="pp-count">${plural(g.ids.length, 'фото', 'фото', 'фото')}</span>
+    <span class="pp-acts">
+      <button class="link" data-act="pp-faces" data-key="${g.key}" title="Посмотреть все лица и убрать чужие">Лица</button>
+      <button class="link" data-act="pp-hide" data-key="${g.key}" title="Не показывать: незнакомые люди, статуи, персонажи">Скрыть</button>
+    </span>
+  </div>`;
+}
+
+function renderPeople() {
+  const el = $('#view-people');
+  const p = S.people;
+  const head = `<div class="list-head"><h2>Люди</h2><span class="sub">Лица на снимках группируются сами, имена даёте вы</span></div>`;
+  if (!p || !p.faces) {
+    // лиц ещё нет: модели и оценку кадра можно запустить прямо отсюда
+    const info = S.aiInfo, f = info?.faces, q = info?.quality;
+    if (!info) { el.innerHTML = head; aiPoll(); return; }
+    const ready = f.packages && f.installed;
+    const job = !ready
+      ? modelBlock(f, 'faces', `Нужны модели лиц (≈ ${fmtSize(f.download_size)}): поиск лиц, точки лица и SFace, который узнаёт, чьё это лицо.`)
+      : q ? jobBlock(q, !f.busy, 'ai-rate', 'ai-rate-stop', 'Оценить', 'фото')
+        + (!q.running && q.total && q.done >= q.total ? '<p class="muted">На снимках не нашлось лиц, которые можно узнать: нужны лица крупнее 48 точек.</p>' : '')
+      : '<p class="muted">Откройте папку.</p>';
+    el.innerHTML = head + `<div class="card ai-card pp-start"><div class="card-head"><span class="t">🙂 Поиск лиц</span></div>
+      <p class="muted">Лица находит оценка кадра — та же, что на <button class="link" data-act="go-ai">странице «AI»</button>.
+      Если фото уже оценивались до появления «Людей», их нужно оценить ещё раз: один раз, около 40 фото в секунду.
+      Когда оценка закончится, лица соберутся в группы.</p>${job}</div>`;
+    return;
+  }
+  const named = p.groups.filter(g => g.name), unnamed = p.groups.filter(g => !g.name);
+  const names = named.map(g => `<option value="${esc(g.name)}">`).join('');
+  el.innerHTML = head + `<datalist id="ppNames">${names}</datalist>
+    <div class="clean-note">Клик по лицу — снимки этого человека. Впишите имя и нажмите Enter: человек появится в фильтре «Кто на снимке» слева, а похожие лица подтянутся к нему. Одно и то же имя у двух групп склеивает их.</div>
+    ${named.length ? `<h3 class="pp-h">С именами <span class="cnt">${named.length}</span></h3><div class="pp-grid">${named.map(personCard).join('')}</div>` : ''}
+    ${unnamed.length ? `<h3 class="pp-h">Без имени <span class="cnt">${unnamed.length}</span></h3><div class="pp-grid">${unnamed.map(personCard).join('')}</div>` : ''}
+    ${!p.groups.length ? emptyHTML('Пока никого', 'Группы появляются, когда одно лицо встречается хотя бы на трёх снимках.') : ''}
+    ${p.hidden ? `<p class="pp-foot muted">Скрыто групп: ${p.hidden} · <button class="link" data-act="pp-unhide">показать снова</button></p>` : ''}`;
+}
+
+/** Все лица группы: отмеченные — «это не он(а)», они уходят из группы. */
+async function personFaces(key) {
+  const g = S.people?.groups.find(x => x.key === key);
+  let faces;
+  try { faces = (await api(`/api/people/faces/${key}`)).faces; } catch (e) { toast(esc(e.message), true); return; }
+  const picked = new Set();
+  const wait = confirmModal(g?.name ? `Лица: ${g.name}` : 'Лица группы',
+    `<p class="muted">Отметьте чужие лица — они уйдут из этой группы и больше не будут подбираться ни к кому.</p>
+     <div class="pp-faces">${faces.map(([fid]) => `<button class="pp-f" data-fid="${fid}"><img src="/api/face/${fid}" alt="" loading="lazy"></button>`).join('')}</div>`,
+    'Убрать отмеченные', true);
+  $('#mBody').onclick = e => {
+    const b = e.target.closest('[data-fid]'); if (!b) return;
+    const id = +b.dataset.fid;
+    if (picked.has(id)) picked.delete(id); else picked.add(id);
+    b.classList.toggle('on', picked.has(id));
+    $('#mOk').textContent = picked.size ? `Убрать отмеченные (${picked.size})` : 'Убрать отмеченные';
+  };
+  const ok = await wait;
+  $('#mBody').onclick = null;
+  if (ok && picked.size) peopleCall('/api/people/exclude', { ids: [...picked] });
 }
 
 // ============================================================ привязка интерфейса
@@ -2321,6 +2441,25 @@ function bindUI() {
     filtersChanged();
   };
   $('#aiCats').addEventListener('click', aiClick);
+  $('#peopleChips').addEventListener('click', e => {
+    const c = e.target.closest('[data-person]'); if (!c) return;
+    toggle(S.peopleSel, +c.dataset.person);
+    toFeed();
+    filtersChanged();
+  });
+  // имя на странице «Люди»: Enter или уход с поля сохраняет, Esc отменяет
+  $('#view-people').addEventListener('keydown', e => {
+    if (!e.target.matches('.pp-name')) return;
+    if (e.key === 'Enter') e.target.blur();
+    if (e.key === 'Escape') { e.target.value = S.people?.groups.find(g => g.key === e.target.dataset.key)?.name || ''; e.target.blur(); }
+    e.stopPropagation();  // клавиши ленты (X, P, F…) в поле имени не срабатывают
+  });
+  $('#view-people').addEventListener('focusout', e => {
+    if (!e.target.matches('.pp-name')) return;
+    const g = S.people?.groups.find(x => x.key === e.target.dataset.key);
+    const name = e.target.value.trim();
+    if (g && name && name !== (g.name || '')) peopleCall('/api/people/name', { key: g.key, name });
+  });
   $('#qCats').addEventListener('click', aiClick);
   $('#aiSearch').addEventListener('submit', e => { e.preventDefault(); runSearch($('#aiQuery').value); });
   $('#aiQuery').addEventListener('keydown', e => { if (e.key === 'Escape') { $('#aiQuery').value = ''; runSearch(''); $('#aiQuery').blur(); } });

@@ -35,8 +35,11 @@ FACES = "faces"
 FACES_FILES = {
     "yunet.onnx": "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar.onnx",
     "face_landmarks.onnx": "https://huggingface.co/naklitechie/face-landmarks-onnx/resolve/main/face_landmarks.onnx",
+    # узнавание лиц для страницы «Люди»: SFace из OpenCV Zoo (Apache 2.0)
+    "face_recognition.onnx": "https://huggingface.co/opencv/face_recognition_sface/resolve/main/"
+                             "face_recognition_sface_2021dec.onnx",
 }
-FACES_SIZE = 5 * 1024 ** 2
+FACES_SIZE = 42 * 1024 ** 2
 REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements-ai.txt"
 GEMMA = "embeddinggemma-2"
 SEMANTIC = (MODEL, GEMMA)  # модели по смыслу, из которых выбирают на странице «AI»
@@ -234,7 +237,7 @@ def faces_manager(data_dir: Path) -> Manager:
     from .faces import FaceModel
 
     return Manager(data_dir, FACES, FACES_FILES, FACES_SIZE,
-                   lambda d: FaceModel(d / "yunet.onnx", d / "face_landmarks.onnx"))
+                   lambda d: FaceModel(d / "yunet.onnx", d / "face_landmarks.onnx", d / "face_recognition.onnx"))
 
 
 # ---------------------------------------------------------------- модель

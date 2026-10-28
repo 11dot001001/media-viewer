@@ -22,14 +22,22 @@ _EYES = (
 )
 
 
+REC_SIZE = 112  # SFace: выровненное лицо 112×112
+# Куда SFace ждёт глаза, нос и уголки рта на выровненном лице (как в OpenCV FaceRecognizerSF.alignCrop)
+_REC_POINTS = np.array([[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655],
+                        [70.7299, 92.2041]], dtype=np.float64)
+
+
 class FaceModel:
-    def __init__(self, det_path: Path, mesh_path: Path):
+    def __init__(self, det_path: Path, mesh_path: Path, rec_path: Path | None = None):
         import onnxruntime as ort
 
+        ort.set_default_logger_severity(3)
         so = ort.SessionOptions()
         so.intra_op_num_threads = 1  # оценка и так идёт во многих потоках сразу
         self.det = ort.InferenceSession(str(det_path), so, providers=["CPUExecutionProvider"])
         self.mesh = ort.InferenceSession(str(mesh_path), so, providers=["CPUExecutionProvider"])
+        self.rec = ort.InferenceSession(str(rec_path), so, providers=["CPUExecutionProvider"]) if rec_path else None
         self._det_out = [o.name for o in self.det.get_outputs()]
 
     # ------------------------------------------------------------ поиск лиц
@@ -94,6 +102,32 @@ class FaceModel:
         gray = np.asarray(crop.convert("L"), dtype=np.float32)
         lap = -4 * gray[1:-1, 1:-1] + gray[:-2, 1:-1] + gray[2:, 1:-1] + gray[1:-1, :-2] + gray[1:-1, 2:]
         return {"ear": ears, "sharp": float(lap[64:192, 48:208].var()), "size": float(max(bw, bh))}
+
+    # ------------------------------------------------------------ кто это
+
+    def align(self, img: Image.Image, face: dict) -> Image.Image:
+        """Лицо 112×112, повёрнутое и отмасштабированное так, чтобы глаза, нос и рот встали на свои места."""
+        m = _similarity(np.asarray(face["kps"], dtype=np.float64), _REC_POINTS)
+        inv = np.linalg.inv(np.vstack([m, [0, 0, 1]]))[:2]  # PIL ждёт отображение «выход → вход»
+        return img.transform((REC_SIZE, REC_SIZE), Image.Transform.AFFINE, tuple(inv.ravel()),
+                             resample=Image.Resampling.BILINEAR)
+
+    def embed(self, img: Image.Image, face: dict) -> np.ndarray:
+        """Отпечаток лица SFace (128 чисел, длина 1): у одного человека на разных снимках косинус ≳ 0.36."""
+        a = np.asarray(self.align(img, face), dtype=np.float32).transpose(2, 0, 1)[None]  # RGB 0–255
+        e = self.rec.run(None, {"data": a})[0][0]
+        return e / max(float(np.linalg.norm(e)), 1e-8)
+
+
+def _similarity(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """Поворот + масштаб + сдвиг (2×3), переводящий точки src в dst по методу наименьших квадратов (Umeyama)."""
+    ms, md = src.mean(0), dst.mean(0)
+    s, d = src - ms, dst - md
+    u, sig, vt = np.linalg.svd(d.T @ s / len(src))
+    fix = np.diag([1.0, np.sign(np.linalg.det(u @ vt))])
+    rot = u @ fix @ vt
+    scale = np.trace(np.diag(sig) @ fix) / s.var(0).sum()
+    return np.hstack([scale * rot, (md - scale * rot @ ms)[:, None]])
 
 
 def _nms(boxes: np.ndarray, scores: np.ndarray, iou: float = 0.3) -> list[int]:
