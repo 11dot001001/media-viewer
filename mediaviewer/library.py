@@ -12,7 +12,9 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import ai, grouping, media, trash
+import numpy as np
+
+from . import ai, copies, grouping, media, trash
 from .classify import classify
 from .journal import Journal
 
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS media(
   status INTEGER NOT NULL DEFAULT 0,
   series_id INTEGER, series_best INTEGER NOT NULL DEFAULT 0,
   dup_id INTEGER, dup_best INTEGER NOT NULL DEFAULT 0, dup_exact INTEGER NOT NULL DEFAULT 0,
+  dup_crop INTEGER NOT NULL DEFAULT 0,
   analyzed INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   match TEXT, match_ref TEXT, match_strong INTEGER,
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS faces(id INTEGER PRIMARY KEY AUTOINCREMENT, media_id 
 CREATE INDEX IF NOT EXISTS ix_faces_media ON faces(media_id);
 CREATE INDEX IF NOT EXISTS ix_faces_cluster ON faces(cluster);
 CREATE TABLE IF NOT EXISTS ocr(id INTEGER PRIMARY KEY, version INTEGER, mtime REAL, text TEXT);
+CREATE TABLE IF NOT EXISTS lookalike(a INTEGER, b INTEGER, ma REAL, mb REAL, score REAL, PRIMARY KEY(a, b));
 CREATE TABLE IF NOT EXISTS persons(id INTEGER PRIMARY KEY, name TEXT, hidden INTEGER NOT NULL DEFAULT 0);
 """
 
@@ -119,7 +123,7 @@ class Library:
             c.executescript(SCHEMA)
             cols = {r["name"] for r in c.execute("PRAGMA table_info(media)")}
             for col, typ in (("match", "TEXT"), ("match_ref", "TEXT"), ("match_strong", "INTEGER"),
-                             ("cloud", "INTEGER NOT NULL DEFAULT 0")):
+                             ("cloud", "INTEGER NOT NULL DEFAULT 0"), ("dup_crop", "INTEGER NOT NULL DEFAULT 0")):
                 if col not in cols:  # индекс от прошлой версии
                     c.execute(f"ALTER TABLE media ADD COLUMN {col} {typ}")
             ai_cols = {r["name"]: r["pk"] for r in c.execute("PRAGMA table_info(ai)")}
@@ -377,6 +381,8 @@ class Library:
         self._set(phase="group", message="Поиск серий и дубликатов…")
         self.regroup()
         self.after_scan()
+        if not self._cancel.is_set():
+            self.find_copies(self.status, self._cancel)
 
     @staticmethod
     def _sha1(p: Path) -> str:
@@ -441,14 +447,26 @@ class Library:
                        q.face_sharp AS q_face_sharp
                        FROM media m LEFT JOIN ai a ON a.id = m.id AND a.model = ? LEFT JOIN quality q ON q.id = m.id
                        WHERE parent_id IS NULL AND analyzed=1""", (self.ai_model,))]
-                res = grouping.compute(rows, self.settings())
-                c.execute("UPDATE media SET series_id=NULL, series_best=0, dup_id=NULL, dup_best=0, dup_exact=0")
+                ids, mat = ai._matrix(self)
+                # смысл снимков: в серию попадают и кадры одного момента, переснятые с паузой до минуты
+                emb = dict(zip(ids.tolist(), mat / np.maximum(np.linalg.norm(mat, axis=1, keepdims=True), 1e-8)))
+                res = grouping.compute(rows, self.settings(), emb, ai.SERIES_SIM[self.ai_model], copies.verified(c))
+                c.execute("UPDATE media SET series_id=NULL, series_best=0, dup_id=NULL, dup_best=0, dup_exact=0, dup_crop=0")
                 c.executemany("UPDATE media SET series_id=?, series_best=? WHERE id=?",
                               [(sid, int(mid in res.series_best), mid) for mid, sid in res.series_id.items()])
-                c.executemany("UPDATE media SET dup_id=?, dup_best=?, dup_exact=? WHERE id=?",
-                              [(gid, int(mid in res.dup_best), int(mid in res.dup_exact), mid)
+                c.executemany("UPDATE media SET dup_id=?, dup_best=?, dup_exact=?, dup_crop=? WHERE id=?",
+                              [(gid, int(mid in res.dup_best), int(mid in res.dup_exact), int(mid in res.dup_crop), mid)
                                for mid, gid in res.dup_id.items()])
             self.status["version"] += 1
+
+    def find_copies(self, status: dict, cancel: threading.Event) -> None:
+        """Копии с другой обрезкой (нужен анализ на странице «AI»): проверяет новые пары и перегруппировывает."""
+        ids, mat = ai._matrix(self)
+        if not len(ids):
+            return
+        norm = mat / np.maximum(np.linalg.norm(mat, axis=1, keepdims=True), 1e-8)
+        if copies.run(self, ids, norm, ai.COPY_SIM[self.ai_model], status, cancel):
+            self.regroup()
 
     # ------------------------------------------------------------ запросы
 
@@ -466,7 +484,7 @@ class Library:
             # Пока идёт сканирование, необработанные файлы не показываем: у них ещё нет ни даты, ни миниатюры
             for r in c.execute(
                     """SELECT media.id AS id, path, kind, ext, size, media.mtime AS mtime, width, height, ts, ts_source, media.model AS model, lat, lon, duration,
-                       sharpness, category, status, series_id, series_best, dup_id, dup_best, dup_exact, error,
+                       sharpness, category, status, series_id, series_best, dup_id, dup_best, dup_exact, dup_crop, error,
                        match, match_ref, match_strong, cloud, ai.label AS ai, ai.aes AS aes,
                        quality.faces AS q_faces, quality.closed AS q_closed
                        FROM media LEFT JOIN ai ON ai.id = media.id AND ai.model = ? LEFT JOIN quality ON quality.id = media.id
@@ -487,7 +505,7 @@ class Library:
                     "w": r["width"], "h": r["height"], "sz": (r["size"] or 0) + sum(k["size"] or 0 for k in kids),
                     "lat": r["lat"], "lon": r["lon"], "dur": r["duration"], "sh": r["sharpness"],
                     "cam": r["model"], "st": r["status"], "s": r["series_id"], "sb": r["series_best"],
-                    "d": r["dup_id"], "db": r["dup_best"], "dx": r["dup_exact"], "cx": cx,
+                    "d": r["dup_id"], "db": r["dup_best"], "dx": r["dup_exact"], "dc": r["dup_crop"], "cx": cx,
                     "v": int(r["mtime"] or 0), "err": r["error"], "cl": r["cloud"],
                     "m": r["match"], "mr": r["match_ref"], "ms": r["match_strong"], "ai": r["ai"],
                     "qa": None if r["aes"] is None else round(r["aes"], 3), "qf": r["q_faces"], "qc": r["q_closed"],

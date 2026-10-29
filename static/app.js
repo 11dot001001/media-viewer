@@ -203,7 +203,7 @@ function handleScan(sc) {
   if (sc.scanning) {
     wasScanning = true;
     box.classList.remove('hidden');
-    const det = sc.total > 0 && ['analyze', 'hash', 'copy', 'list'].includes(sc.phase);
+    const det = sc.total > 0 && ['analyze', 'hash', 'copy', 'list', 'copies'].includes(sc.phase);
     box.classList.toggle('indeterminate', !det);
     $('.bar i', box).style.width = det ? (sc.done / sc.total * 100).toFixed(1) + '%' : '';
     const text = {
@@ -211,6 +211,7 @@ function handleScan(sc) {
       analyze: `Анализ: ${sc.done} из ${sc.total}${sc.errors ? ` · ошибок ${sc.errors}` : ''}`,
       hash: `Поиск точных копий: ${sc.done} из ${sc.total}`,
       group: 'Поиск серий и дубликатов…',
+      copies: sc.message,
       copy: `Копирование с телефона: ${sc.done} из ${sc.total}`,
       list: `${sc.message}: ${sc.done} из ${sc.total}`,
       match: sc.message,
@@ -689,7 +690,7 @@ function tileHTML(it, o = {}) {
   else if (it.ph === -2) b.push(`<span class="bdg phmis" title="Не удалось прочитать файл с телефона для сверки — разблокируйте iPhone и повторите поиск">${PHONE_ICON}<i>?</i></span>`);
   else if (it.ph === -1) b.push(`<span class="bdg phmis" title="На телефоне есть файл того же размера и даты, но содержимое другое — его не удалим">${PHONE_ICON}<i>≠</i></span>`);
   if (it.qc > 0) b.push(`<span class="bdg eyes" title="Закрыты глаза: ${it.qc} из ${plural(it.qf, 'лица', 'лиц', 'лиц')}"><svg class="i"><use href="#i-eye-off"/></svg></span>`);
-  if (it.d) b.push(`<span class="bdg dup" title="${it.dx ? 'Есть точная копия' : 'Есть похожий дубликат'}">⧉</span>`);
+  if (it.d) b.push(`<span class="bdg dup" title="${it.dx ? 'Есть точная копия' : it.dc ? 'Есть копия с другой обрезкой' : 'Есть похожий дубликат'}">⧉</span>`);
   for (const c of it.cx || []) b.push(`<span class="bdg cx" title="${c === 'RAW' ? 'Есть RAW-файл с тем же именем' : c === 'LIVE' ? 'Live Photo: есть видео с тем же именем' : 'Связанный файл'}">${c}</span>`);
   if (it.err) b.push(`<span class="bdg err" title="${esc(it.err)}">!</span>`);
   if (it.cl) b.push('<span class="bdg offline" title="Файл ещё не скачан из облака на компьютер, поэтому не разобран: нет миниатюры, серий и дубликатов. Когда он скачается, пересканируйте папку.">☁↓</span>');
@@ -910,11 +911,12 @@ function renderDups() {
     <span class="sub">${plural(groups.length, 'группа', 'группы', 'групп')} · лишних копий ${extra.length} (${fmtSize(extra.reduce((s, i) => s + i.sz, 0))})</span>
     <div class="spacer"></div>
     <button class="btn primary" data-act="dup-all" ${pending.length ? '' : 'disabled'}>Во всех группах оставить ★ лучшее</button></div>`;
-  if (!groups.length) html += emptyHTML('Дубликатов не найдено', 'Точные копии ищутся по содержимому файла, похожие — по картинке (например, пересжатые мессенджером).');
+  if (!groups.length) html += emptyHTML('Дубликатов не найдено', 'Точные копии ищутся по содержимому файла, похожие — по картинке (например, пересжатые мессенджером), а после анализа на странице «AI» — и копии с другой обрезкой.');
   for (const [gid, arr] of groups) {
     const exact = arr.every(i => i.dx);
+    const crop = !exact && arr.some(i => i.dc);
     html += `<div class="card" data-gid="${gid}">
-      <div class="card-head"><span class="pill ${exact ? 'exact' : ''}">${exact ? 'Точные копии' : 'Похожие'}</span>
+      <div class="card-head"><span class="pill ${exact ? 'exact' : ''}">${exact ? 'Точные копии' : crop ? 'Другая обрезка' : 'Похожие'}</span>
         <span class="t">${plural(arr.length, 'файл', 'файла', 'файлов')}</span><span class="sub">${fmtDT(arr[0].t)}</span>
         <div class="spacer"></div>
         <button class="btn small" data-act="dup-auto" data-gid="${gid}">Оставить ★, остальные удалить</button></div>
@@ -1423,7 +1425,7 @@ async function loadInfo(it) {
     d.children?.length ? ['Связанные', d.children.map(c => esc(c.path.split('/').pop()) + ' · ' + fmtSize(c.size)).join('<br>')] : null,
     it.s ? ['Серия', `${S.series.get(it.s)?.length || ''} кадров${it.sb ? ' · ★ рекомендован' : ''}`] : null,
     it.m ? ['Сверка', `${MATCH[it.m]?.label || it.m}${it.ms === 0 ? ' (похоже)' : ''}${it.mr ? `<br><span class="muted">${esc(it.mr)}</span>` : ''}`] : null,
-    it.d ? ['Дубликат', `${it.dx ? 'точная копия' : 'похожий'}${it.db ? ' · ★ лучший в группе' : ''}`] : null,
+    it.d ? ['Дубликат', `${it.dx ? 'точная копия' : it.dc ? 'копия с другой обрезкой' : 'похожий'}${it.db ? ' · ★ лучший в группе' : ''}`] : null,
     d.error ? ['Ошибка', `<span style="color:var(--reject)">${esc(d.error)}</span>`] : null,
   ].filter(Boolean);
   el.innerHTML = `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
@@ -1993,7 +1995,9 @@ const CLEAN = [
   { key: 'exact', emoji: '⧉', title: 'Точные копии', hint: 'Тот же файл байт в байт; остаётся лучшая копия ★.',
     test: it => it.d && it.dx && !it.db },
   { key: 'near', emoji: '🗜️', title: 'Пересжатые копии', hint: 'Та же картинка хуже качеством — например, из WhatsApp; остаётся лучшая ★.',
-    test: it => it.d && !it.dx && !it.db },
+    test: it => it.d && !it.dx && !it.dc && !it.db },
+  { key: 'crop', emoji: '✂️', title: 'Копии с другой обрезкой', hint: 'Та же картинка, обрезанная или уменьшенная: версия для Instagram, из мессенджера. Остаётся ★ — где больше пикселей; если обрезку делали нарочно, оставьте её.',
+    test: it => it.d && it.dc && !it.dx && !it.db },
   { key: 'shots', emoji: '📱', title: 'Скриншоты старше года', hint: 'Обычно нужны ненадолго: маршруты, брони, переписка.',
     test: it => it.c === 'screenshot' && it.t != null && it.t < Date.now() / 1000 - YEAR },
   { key: 'memes', emoji: '😂', title: 'Мемы и картинки из мессенджеров', hint: 'Пересланные картинки, не ваши снимки.',
@@ -2193,7 +2197,7 @@ function jobBlock(a, ready, startAct, stopAct, verb, what) {
   const rate = a.running && a.done > 0 && a.started ? a.done / (Date.now() / 1000 - a.started) : 0;
   const eta = rate && a.total > a.done ? ` · осталось ≈ ${fmtDur((a.total - a.done) / rate) || '0:01'}` : '';
   const head = a.running
-    ? (a.phase === 'load' ? 'Загрузка модели…' : `${esc(a.message)} · ${a.done} из ${a.total}${eta}`)
+    ? (a.phase === 'load' ? 'Загрузка модели…' : a.phase === 'copies' ? esc(a.message) : `${esc(a.message)} · ${a.done} из ${a.total}${eta}`)
     : !left && a.total ? `Все ${what} обработаны: <b>${a.total}</b>`
       : `Обработано <b>${a.done}</b> из ${a.total}${left && a.done ? ` · новых: ${left}` : ''}`;
   const btn = a.running

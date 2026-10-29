@@ -455,6 +455,7 @@ class Analyzer:
                         self.lib.status["version"] += 1
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
+        self.lib.find_copies(self.status, self._cancel)  # копии с другой обрезкой: по новым эмбеддингам
 
 
 # ---------------------------------------------------------------- поиск
@@ -500,6 +501,13 @@ def search(lib, manager: Manager, text: str, limit: int = 600) -> list[list]:
 # У EmbeddingGemma косинусы выше (медиана 0.67): ту же долю пар пропускает порог 0.77.
 SIMILAR_MIN = {MODEL: 0.72, GEMMA: 0.77}
 SIMILAR_AT_LEAST = 8  # если порог прошли немногие — всё равно показать ближайшие
+# Серии по смыслу: соседние по времени кадры, переснятые в тот же момент, — (пауза до, сек; сходство от).
+# Пороги строгие: при 0.90–0.93 в одну «серию» склеивалась вся фотосессия (до сотни кадров с разными позами).
+# Пороги EmbeddingGemma подобраны на «Фотокамере» так, чтобы проходила та же доля пар.
+SERIES_SIM = {MODEL: ((15, 0.95), (60, 0.97)), GEMMA: ((15, 0.959), (60, 0.976))}
+# Кандидаты в копии с другой обрезкой (их затем проверяет copies.py попиксельно). У найденных на «Фотокамере»
+# копий сходство SigLIP от 0.87 (медиана 0.94), EmbeddingGemma — от 0.944: обрезка сильнее сбивает SigLIP.
+COPY_SIM = {MODEL: 0.92, GEMMA: 0.95}
 
 
 def _nearest(lib, ids: np.ndarray, mat: np.ndarray, q: np.ndarray, skip: int | None, limit: int) -> list[list]:

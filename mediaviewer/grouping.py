@@ -1,4 +1,8 @@
-"""Поиск серий (кадры подряд и похожие) и дубликатов (точные копии и почти одинаковые)."""
+"""Поиск серий (кадры подряд и похожие) и дубликатов (точные копии и почти одинаковые).
+
+Если папка проанализирована на странице «AI», учитывается и смысл снимка: в серию попадают кадры одной сцены,
+снятые с другой точки или через минуту, а в дубликаты — копии с другой обрезкой (см. copies.py).
+"""
 from __future__ import annotations
 
 import re
@@ -26,6 +30,7 @@ class Result:
     dup_id: dict[int, int] = field(default_factory=dict)
     dup_best: set[int] = field(default_factory=set)
     dup_exact: set[int] = field(default_factory=set)
+    dup_crop: set[int] = field(default_factory=set)  # копия с другой обрезкой или размером (найдена через copies.py)
 
 
 def _u64(v: int) -> int:
@@ -95,8 +100,19 @@ def _series_best(run: list[dict], k: int) -> list[dict]:
     return sorted(run, key=key, reverse=True)[:k]
 
 
-def compute(rows: list[dict], s: Settings) -> Result:
+def compute(rows: list[dict], s: Settings, emb: dict | None = None, sem: tuple = (),
+            copies: list[tuple[int, int]] = ()) -> Result:
+    """emb — нормированные векторы смысла снимков (id → вектор), sem — ((пауза, сек, мин. сходство), ...) для серий,
+    copies — пары, проверенные попиксельно как одна картинка."""
     res = Result()
+    emb = emb or {}
+
+    def same_scene(prev: list[dict], r: dict, gap: float) -> bool:
+        b = emb.get(r["id"])
+        need = next((sim for limit, sim in sem if gap <= limit), None)
+        if b is None or need is None:
+            return False
+        return any((a := emb.get(x["id"])) is not None and float(a @ b) >= need for x in prev)
 
     # ---------- серии: идём по времени, соседние кадры с маленькой паузой и похожей картинкой.
     # Точные копии файла в серию не берём (это дубликаты, а не кадры).
@@ -118,8 +134,8 @@ def compute(rows: list[dict], s: Settings) -> Result:
             gap = r["ts"] - prev["ts"]
             same_cam = not (prev["model"] and r["model"] and prev["model"] != r["model"])
             limit = s.series_dist + (4 if gap <= 2 else 0)  # настоящая серийная съёмка — порог мягче
-            similar = any(hamming(x["phash"], r["phash"]) <= limit for x in cur[-3:])
-            if gap <= s.series_gap and same_cam and similar:
+            similar = gap <= s.series_gap and any(hamming(x["phash"], r["phash"]) <= limit for x in cur[-3:])
+            if same_cam and (similar or same_scene(cur[-3:], r, gap)):
                 cur.append(r)
                 continue
             if len(cur) > 1:
@@ -144,6 +160,7 @@ def compute(rows: list[dict], s: Settings) -> Result:
         for r in group[1:]:
             uf.union(group[0]["id"], r["id"])
 
+    known = {r["id"] for r in rows}
     cand = [r for r in rows if r["kind"] == "image" and r["phash"] is not None and r["dhash"] is not None]
     if len(cand) > 1:
         ph = np.array([r["phash"] for r in cand], dtype=np.int64).view(np.uint64)
@@ -157,6 +174,12 @@ def compute(rows: list[dict], s: Settings) -> Result:
                 if sid is not None and res.series_id.get(other) == sid:
                     continue  # похожие кадры одной серии разбираются в режиме серий
                 uf.union(cand[i]["id"], other)
+    for a, b in copies:  # та же картинка с другой обрезкой или размером
+        if a in known and b in known:
+            sid = res.series_id.get(a)
+            if sid is None or res.series_id.get(b) != sid:
+                uf.union(a, b)
+                res.dup_crop.update((a, b))
 
     by_id = {r["id"]: r for r in rows}
     groups: dict[int, list[dict]] = defaultdict(list)
