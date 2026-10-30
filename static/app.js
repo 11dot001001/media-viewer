@@ -186,8 +186,12 @@ function applyState(st) {
   if (st.scan) handleScan(st.scan);
 }
 
-function showWelcome(on) {
+function showWelcome(on, force = false) {
+  // The welcome screen is a real view: it must never cover an open library.
+  // Opening another folder goes through the path field or recent-folder list.
+  on = Boolean(on) && !S.root;
   $('#welcome').classList.toggle('hidden', !on);
+  document.body.classList.toggle('welcoming', on);
   $('#welcomeBack')?.classList.toggle('hidden', !S.root);
 }
 
@@ -195,6 +199,14 @@ function renderRecent(list) {
   $('#recentList').innerHTML = list.length
     ? '<h5>Недавние папки</h5>' + list.map(p => `<button data-path="${esc(p)}" title="${esc(p)}">${esc(p)}</button>`).join('')
     : '';
+  $('#recentPickerList').innerHTML = list.length
+    ? '<h3>Недавние папки</h3>' + list.map(p => `<button data-path="${esc(p)}" title="${esc(p)}"><svg class="i"><use href="#i-folder"/></svg><span>${esc(p)}</span><svg class="i recent-arrow"><use href="#i-right"/></svg></button>`).join('')
+    : '<p class="muted recent-empty">Недавние папки появятся здесь.</p>';
+}
+
+function showFolderChooser(on) {
+  $('#folderChooser').classList.toggle('hidden', !on);
+  if (on) $('#btnCloseFolderChooser').focus();
 }
 
 function handleScan(sc) {
@@ -616,6 +628,8 @@ function renderFilterSummary() {
     + (S.search ? 1 : 0) + (S.match ? 1 : 0);
   $('#fltCount').textContent = n;
   $('#fltCount').classList.toggle('hidden', !n);
+  $('#filterBadge').textContent = n;
+  $('#filterBadge').classList.toggle('hidden', !n);
   $('#fltReset').classList.toggle('hidden', !n);
   $('#typeVal').textContent = S.types.size === 1 ? CATS[[...S.types][0]].label : S.types.size ? `выбрано ${S.types.size}` : '';
   $$('#statusFilter button').forEach(b => b.classList.toggle('active', b.dataset.v === S.status));
@@ -650,6 +664,7 @@ function setView(v) {
   if (v === 'trash') S.stats = null;  // статистику перечитываем при каждом открытии корзины
   S.selected.clear();
   S.focus = null;
+  showWelcome(!S.root && v !== 'ai');
   $('#stTip')?.classList.add('hidden');  // подсказка графика статистики
   render();
   $('#view-' + v).scrollTop = 0;
@@ -657,7 +672,25 @@ function setView(v) {
 
 function render() {
   updateCounts();
-  $$('#views button').forEach(b => b.classList.toggle('active', b.dataset.view === S.view));
+  const pages = {
+    grid: ['Все снимки', 'Фото и видео, собранные по дням'],
+    series: ['Серии', 'Сравните похожие кадры и сохраните лучшие'],
+    dups: ['Дубликаты', 'Найдите повторные снимки и освободите место'],
+    map: ['Карта', 'Ваша коллекция в местах и путешествиях'],
+    people: ['Люди', 'Любимые лица в вашей коллекции'],
+    stats: ['Статистика', 'История вашей медиатеки в цифрах'],
+    clean: ['Можно удалить', 'Подсказки для бережной очистки коллекции'],
+    trash: ['Корзина отбора', 'Проверьте отмеченные файлы перед удалением'],
+    ai: ['AI-инструменты', 'Умный поиск, лица и текст — на вашем компьютере'],
+  };
+  const page = pages[S.view];
+  $('#pageTitle').textContent = page[0];
+  $('#pageDescription').textContent = page[1];
+  $$('#views button').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === S.view);
+    if (b.dataset.view === S.view) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  });
   $$('.view').forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + S.view));
   // страница «AI» открывается и без папки: модель можно скачать заранее
   if (S.view === 'ai') { if (!S.root) showWelcome(false); renderAI(); return; }
@@ -843,13 +876,16 @@ function gridList() {
 function renderGrid() {
   const el = $('#view-grid');
   const full = gridList();
+  const grouping = S.search ? 'Результаты поиска' : S.sort === 'size' ? 'По размеру файлов'
+    : { day: 'По дням', month: 'По месяцам', year: 'По годам' }[granularity()];
+  $('#pageDescription').textContent = `${plural(full.length, 'файл', 'файла', 'файлов')} · ${grouping}`;
   S.list = full.filter(it => !S.folded.has(groupKey(it)));  // свёрнутые дни не участвуют в навигации
   if (!S.items.length) {
     el.innerHTML = emptyHTML(wasScanning ? 'Идёт сканирование…' : 'Здесь пока пусто', 'Фото и видео появятся по мере анализа.');
     return;
   }
   el.innerHTML = full.length ? daysHTML(full, { collapse: S.collapse, foldable: true, lazy: newLazy(el) })
-    : emptyHTML('Ничего не найдено', 'Измените фильтры слева.');
+    : emptyHTML('Ничего не найдено', 'Измените условия в панели «Фильтры и вид».');
   attachLazy(el);
 }
 
@@ -867,7 +903,7 @@ function renderSeries() {
   const frames = order.reduce((n, sid) => n + S.series.get(sid).length, 0);
   const done = order.filter(seriesDone).length;
   const list = S.onlyOpen ? order.filter(sid => !seriesDone(sid)) : order;
-  let html = `<div class="list-head"><h2>Серии похожих кадров</h2>
+  let html = `<div class="list-head">
     <span class="sub">${plural(order.length, 'серия', 'серии', 'серий')} · ${plural(frames, 'кадр', 'кадра', 'кадров')} · разобрано ${done}</span>
     <div class="spacer"></div>
     <label class="row check"><input type="checkbox" id="onlyOpen" ${S.onlyOpen ? 'checked' : ''}> только неразобранные</label>
@@ -907,7 +943,7 @@ function renderDups() {
   const groups = dupGroups();
   const extra = groups.flatMap(([, arr]) => arr.filter(i => !i.db));
   const pending = extra.filter(i => i.st !== 2);
-  let html = `<div class="list-head"><h2>Дубликаты</h2>
+  let html = `<div class="list-head">
     <span class="sub">${plural(groups.length, 'группа', 'группы', 'групп')} · лишних копий ${extra.length} (${fmtSize(extra.reduce((s, i) => s + i.sz, 0))})</span>
     <div class="spacer"></div>
     <button class="btn primary" data-act="dup-all" ${pending.length ? '' : 'disabled'}>Во всех группах оставить ★ лучшее</button></div>`;
@@ -944,7 +980,7 @@ function renderTrash() {
       ? 'Файлы будут перемещены в <b>Корзину Windows</b> — при необходимости их можно восстановить оттуда.'
       : 'На этом диске нет Корзины Windows (флешка, карта памяти или сетевой диск) — файлы будут перенесены в папку <b>_rejected</b> внутри открытой папки. Удалите её вручную, когда будете уверены.')
     + (S.trashTarget !== 'phone' ? ` Отпечатки удалённых снимков запоминаются в журнале (сейчас в нём ${S.journal}): при сверке с телефоном их копии будут сразу помечены к удалению.` : '');
-  let html = `<div class="list-head"><h2>Корзина отбора</h2>
+  let html = `<div class="list-head">
     <span class="sub">${plural(all.length, 'файл', 'файла', 'файлов')} · ${fmtSize(size)}</span><div class="spacer"></div>
     ${S.source?.kind === 'folder' ? `<button class="btn" data-act="phone-find" ${all.length && !findRunning() ? '' : 'disabled'} title="Найти эти снимки на подключённом iPhone, чтобы удалить их и оттуда">${PHONE_ICON} Найти на телефоне</button>` : ''}
     <button class="btn ghost" data-act="trash-restore" ${all.length ? '' : 'disabled'}>Вернуть все</button>
@@ -1963,7 +1999,7 @@ async function pickFolder() {
   toast('Открывается окно выбора папки…', false, 2000);
   try {
     const r = await api('/api/pick-folder');
-    if (r.path) openFolder(r.path);
+    if (r.path) await openFolder(r.path);
   } catch (e) { toast(esc(e.message), true); }
 }
 
@@ -1977,6 +2013,7 @@ async function openFolder(path) {
     lastVersion = -1;
     mapDirty = true;
     applyState(st);
+    showFolderChooser(false);
     setView('grid');
   } catch (e) { toast(esc(e.message), true); }
 }
@@ -2030,7 +2067,7 @@ function renderClean() {
   const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap')) || 4;
   const thumb = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--thumb')) || 160;
   const perRow = Math.max(1, Math.floor((el.clientWidth - 44 - 34 + gap) / (thumb + gap)));
-  let html = `<div class="list-head"><h2>Можно удалить</h2>
+  let html = `<div class="list-head">
     <span class="sub">${total ? `${plural(total, 'файл', 'файла', 'файлов')} · ${fmtSize(size)}` : ''}</span><div class="spacer"></div>
     ${total ? `<button class="btn reject" data-act="clean-mark" title="Отметить к удалению всё, что на этой странице">Отметить всё к удалению</button>` : ''}</div>
     <div class="clean-note">Подсказки по неразобранным снимкам. «Отметить» кладёт их в <b>Корзину отбора</b> — сами файлы удаляются только после подтверждения там. Клавиши как в ленте: <kbd>X</kbd> удалить, <kbd>P</kbd> оставить, двойной клик — открыть.</div>${aiNote}`;
@@ -2240,7 +2277,7 @@ function modelPicker(info) {
 function renderAI() {
   const el = $('#view-ai');
   const info = S.aiInfo;
-  if (!info) { el.innerHTML = '<div class="list-head"><h2>AI</h2></div>'; if (!aiTimer) aiPoll(); return; }
+  if (!info) { el.innerHTML = '<div class="list-head"></div>'; if (!aiTimer) aiPoll(); return; }
   if (!aiTimer) aiTimer = setTimeout(aiPoll, 3000);
   const ready = info.packages && info.installed;
   const installing = info.busy;
@@ -2280,7 +2317,7 @@ function renderAI() {
   const cats = aiLabels().filter(l => counts[l.key]).map(l =>
     `<button class="ai-chip" data-act="ai-cat" data-key="${l.key}">${markHTML(l)}${l.label}<span class="cnt">${counts[l.key]}</span></button>`).join('');
 
-  el.innerHTML = `<div class="list-head"><h2>AI</h2><span class="sub">Нейросеть работает на этом компьютере: снимки никуда не отправляются</span></div>
+  el.innerHTML = `<div class="list-head"><span class="sub">Нейросеть работает на этом компьютере: снимки никуда не отправляются</span></div>
     <div class="ai-grid">
       <div class="card ai-card"><div class="card-head"><span class="t">Модель по смыслу</span>${pill}</div>
         <p class="muted">Понимает, что на снимке: раскладывает снимки по категориям, ищет по описанию на русском и английском и оценивает красоту кадра.</p>
@@ -2377,7 +2414,7 @@ function personCard(g) {
 function renderPeople() {
   const el = $('#view-people');
   const p = S.people;
-  const head = `<div class="list-head"><h2>Люди</h2><span class="sub">Лица на снимках группируются сами, имена даёте вы</span></div>`;
+  const head = `<div class="list-head"><span class="sub">Лица на снимках группируются сами, имена даёте вы</span></div>`;
   if (!p || !p.faces) {
     // лиц ещё нет: модели и оценку кадра можно запустить прямо отсюда
     const info = S.aiInfo, f = info?.faces, q = info?.quality;
@@ -2442,11 +2479,16 @@ function bindUI() {
   back.onclick = () => showWelcome(false);
   $('.welcome-card').appendChild(back);
 
-  $('#btnOpen').onclick = () => showWelcome(true);
+  $('#btnOpen').onclick = () => showFolderChooser(true);
+  $('#btnCloseFolderChooser').onclick = () => showFolderChooser(false);
+  $('#folderChooser').addEventListener('click', e => { if (e.target === e.currentTarget) showFolderChooser(false); });
+  $('#btnPickFolder').onclick = pickFolder;
+  $('#folderPathForm').addEventListener('submit', e => { e.preventDefault(); const path = $('#folderPathInput').value.trim().replace(/^"|"$/g, ''); if (path) openFolder(path); });
   $('#btnOpen2').onclick = pickFolder;
   $('#btnPathGo').onclick = () => { const p = $('#pathInput').value.trim().replace(/^"|"$/g, ''); if (p) openFolder(p); };
   $('#pathInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnPathGo').click(); });
   $('#recentList').addEventListener('click', e => { const b = e.target.closest('[data-path]'); if (b) openFolder(b.dataset.path); });
+  $('#recentPickerList').addEventListener('click', e => { const b = e.target.closest('[data-path]'); if (b) openFolder(b.dataset.path); });
   $('#btnRescan').onclick = async () => { try { handleScan(await api('/api/rescan', {})); } catch (e) { toast(esc(e.message), true); } };
   $('#btnTrashTop').onclick = () => setView('trash');
   $('#btnPhone').onclick = phoneDialog;
@@ -2611,10 +2653,30 @@ function bindUI() {
     } catch (e) { toast(esc(e.message), true); }
   };
 
-  $('#sidebar').addEventListener('click', e => {
+  $('#filterPanel').addEventListener('click', e => {
     const act = e.target.closest('[data-act]');
     if (act) onAction(act.dataset.act, act);
   });
+
+  const toggleFilters = on => {
+    $('#filterPanel').classList.toggle('hidden', !on);
+    $('#btnFilters').setAttribute('aria-expanded', String(on));
+    $('#btnFilters').classList.toggle('on', on);
+    prefs.set('filtersOpen', on);
+    requestAnimationFrame(() => { layoutTiles(); if (S.view === 'map' && MAP) MAP.invalidateSize(); });
+  };
+  $('#btnFilters').onclick = () => toggleFilters($('#filterPanel').classList.contains('hidden'));
+  $('#btnCloseFilters').onclick = () => { toggleFilters(false); $('#btnFilters').focus(); };
+  $('#filterPanel').addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !CAL.anchor) {
+      e.stopPropagation();
+      toggleFilters(false);
+      $('#btnFilters').focus();
+    }
+  });
+  toggleFilters(prefs.get('filtersOpen', window.innerWidth >= 1450));
+  $$('#views button').forEach(b => { if (!b.title) b.title = b.childNodes[1]?.textContent.trim() || b.textContent.trim(); });
+  $('#btnFilters').setAttribute('aria-label', 'Фильтры и вид');
 
   const main = $('#main');
   // Ctrl + колесо (и «щипок» на тачпаде) — сколько снимков в ряду
@@ -2717,6 +2779,7 @@ function bindUI() {
 
   document.addEventListener('keydown', e => {
     if (e.target.matches('input, select, textarea')) return;
+    if (e.key === 'Escape' && !$('#folderChooser').classList.contains('hidden')) { showFolderChooser(false); return; }
     if (!$('#modal').classList.contains('hidden')) {
       if (e.key === 'Escape') M.resolve?.(false);
       if (e.key === 'Enter') { e.preventDefault(); M.resolve?.(true); }
@@ -2735,8 +2798,9 @@ function bindUI() {
 /** Ширина плитки из числа колонок: ряд всегда заполняет ширину ленты. */
 function layoutTiles() {
   const view = $('#view-grid');
-  const w = (view.clientWidth || $('#main').clientWidth) - 44;  // минус боковые отступы ленты
-  const gap = S.cols >= 12 ? 2 : S.cols >= 8 ? 3 : 4;
+  const viewStyle = getComputedStyle(view);
+  const w = (view.clientWidth || $('#main').clientWidth) - parseFloat(viewStyle.paddingLeft) - parseFloat(viewStyle.paddingRight);
+  const gap = S.cols >= 12 ? 2 : S.cols >= 8 ? 4 : 8;
   const thumb = Math.max(24, Math.floor((w - gap * (S.cols - 1)) / S.cols));
   const root = document.documentElement.style;
   root.setProperty('--thumb', thumb + 'px');

@@ -63,7 +63,7 @@ function renderStats() {
   const D = ST.data = statsCompute();
   const ys = [...D.years.keys()].sort((a, b) => a - b);
   if (!D.items.length) {
-    el.innerHTML = '<div class="list-head"><h2>Статистика</h2></div>' + emptyHTML('Нет снимков с датой', S.items.length ? 'Измените фильтры слева.' : '');
+    el.innerHTML = '<div class="list-head"></div>' + emptyHTML('Нет снимков с датой', S.items.length ? 'Измените условия в панели «Фильтры и вид».' : '');
     return;
   }
   if (!D.years.has(ST.year)) ST.year = ys[ys.length - 1];
@@ -86,7 +86,7 @@ function renderStats() {
     .map(y => `<button class="chip${y === ST.cmp ? ' active cmp' : ''}" data-act="st-cmp" data-y="${y}">${y}</button>`).join('') +
     `<button class="chip${!ST.cmp ? ' active' : ''}" data-act="st-cmp" data-y="0">ни с чем</button>` : '';
 
-  el.innerHTML = `<div class="list-head"><h2>Статистика</h2><span class="sub">${shots(D.items.length)} · ${span}</span>
+  el.innerHTML = `<div class="list-head"><span class="sub">${shots(D.items.length)} · ${span}</span>
       ${filtered ? '<span class="st-note">с учётом фильтров слева · <button class="link" data-act="st-reset">сбросить</button></span>' : ''}</div>
     <div class="st-tiles">${tiles}</div>
     <section class="card st-card">

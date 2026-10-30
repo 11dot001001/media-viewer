@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Media Viewer</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%23818cf8'/><stop offset='1' stop-color='%23c084fc'/></linearGradient></defs><rect width='32' height='32' rx='9' fill='url(%23g)'/><circle cx='16' cy='16' r='7' fill='none' stroke='white' stroke-width='3'/><circle cx='23.5' cy='8.5' r='2' fill='white'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%235c9cf5'/><stop offset='1' stop-color='%23407ada'/></linearGradient></defs><rect width='32' height='32' rx='9' fill='url(%23g)'/><circle cx='16' cy='16' r='7' fill='none' stroke='white' stroke-width='3'/><circle cx='23.5' cy='8.5' r='2' fill='white'/></svg>">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="/static/style.css">
@@ -14,7 +14,7 @@
 <!-- Иконки (в стиле Lucide) -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
-    <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#818cf8"/><stop offset="1" stop-color="#c084fc"/></linearGradient>
+    <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5c9cf5"/><stop offset="1" stop-color="#407ada"/></linearGradient>
   </defs>
   <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></symbol>
   <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></symbol>
@@ -51,7 +51,7 @@
     <span class="lbl">Media Viewer</span>
   </div>
   <div class="tb-group">
-    <button id="btnOpen" class="btn"><svg class="i"><use href="#i-folder"/></svg><span class="lbl">Открыть папку</span></button>
+    <button id="btnOpen" class="btn" aria-label="Открыть папку" title="Открыть папку"><svg class="i"><use href="#i-folder"/></svg><span class="lbl">Открыть папку</span></button>
     <button id="btnPhone" class="btn" title="Сверить iPhone с облаком и подчистить его"><svg class="i"><use href="#i-phone"/></svg><span class="lbl">Телефон</span></button>
   </div>
   <div class="tb-source">
@@ -74,22 +74,101 @@
     <div class="sb-top">
       <form id="aiSearch" class="sb-search" autocomplete="off">
         <svg class="i"><use href="#i-search"/></svg>
-        <input id="aiQuery" type="search" placeholder="Поиск по имени файла" title="Enter — искать, Esc — сбросить">
+        <input id="aiQuery" type="search" aria-label="Поиск в медиатеке" placeholder="Поиск по имени файла" title="Enter — искать, Esc — сбросить">
         <kbd class="sb-key" title="Клавиша / — перейти к поиску">/</kbd>
       </form>
-      <nav id="views">
-        <button data-view="grid" class="active"><svg class="i"><use href="#i-grid"/></svg>Лента<span class="cnt" id="cnt-grid"></span></button>
+      <nav id="views" aria-label="Разделы медиатеки">
+        <span class="nav-label">Медиатека</span>
+        <button data-view="grid" class="active"><svg class="i"><use href="#i-grid"/></svg>Все снимки<span class="cnt" id="cnt-grid"></span></button>
         <button data-view="series"><svg class="i"><use href="#i-layers"/></svg>Серии<span class="cnt" id="cnt-series"></span></button>
         <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
         <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
         <button data-view="people" title="Снимки по людям: лица группируются сами, имена даёте вы"><svg class="i"><use href="#i-users"/></svg>Люди<span class="cnt" id="cnt-people"></span></button>
         <button data-view="stats"><svg class="i"><use href="#i-chart"/></svg>Статистика<span class="cnt" id="cnt-stats"></span></button>
+        <span class="nav-label">Порядок в коллекции</span>
         <button data-view="clean" title="Подсказки: что, скорее всего, можно удалить"><svg class="i"><use href="#i-broom"/></svg>Можно удалить<span class="cnt" id="cnt-clean"></span></button>
         <button data-view="trash"><svg class="i"><use href="#i-trash"/></svg>Корзина отбора<span class="cnt" id="cnt-trash"></span></button>
-        <button data-view="ai"><svg class="i"><use href="#i-sparkles"/></svg>AI<span class="cnt" id="cnt-ai"></span></button>
+        <button data-view="ai"><svg class="i"><use href="#i-sparkles"/></svg>AI-инструменты<span class="cnt" id="cnt-ai"></span></button>
       </nav>
     </div>
 
+    <div class="local-note"><span class="local-dot"></span>Локальная медиатека<small>Ваши файлы остаются у вас</small></div>
+
+    <div class="sb-foot">
+      <details class="sb-pop">
+        <summary title="Как программа находит серии похожих кадров"><svg class="i"><use href="#i-sliders"/></svg>Серии</summary>
+        <div class="pop-card">
+          <h5>Поиск серий</h5>
+          <label class="row">Пауза между кадрами, с <input type="number" id="setGap" min="1" max="600" step="1"></label>
+          <label class="row">Похожесть <span class="range-val"><input type="range" id="setDist" min="6" max="32" step="1"><span id="setDistVal" class="mono"></span></span></label>
+          <label class="row">Оставлять из серии
+            <select id="setKeep">
+              <option value="auto">авто (1–2)</option>
+              <option value="1">1 кадр</option>
+              <option value="2">2 кадра</option>
+              <option value="3">3 кадра</option>
+            </select>
+          </label>
+          <button id="btnRegroup" class="btn small wide">Пересчитать</button>
+        </div>
+      </details>
+      <details class="sb-pop keys">
+        <summary title="Горячие клавиши"><svg class="i"><use href="#i-keyboard"/></svg>Клавиши</summary>
+        <div class="pop-card">
+          <h5>Клавиши</h5>
+          <div><kbd>/</kbd> поиск · <kbd>Ctrl</kbd> + колесо — масштаб ленты</div>
+          <div><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> навигация · <kbd>Enter</kbd> открыть · <kbd>Esc</kbd> закрыть</div>
+          <div>В просмотре: <kbd>←</kbd><kbd>→</kbd> листать, <kbd>↑</kbd> оставить, <kbd>↓</kbd> удалить</div>
+          <div><kbd>P</kbd> оставить · <kbd>X</kbd>/<kbd>Del</kbd> удалить · <kbd>U</kbd> снять</div>
+          <div><kbd>S</kbd> разобрать серию · <kbd>C</kbd> сравнить выбранные</div>
+          <div><kbd>F</kbd> похожие снимки · перетащите картинку в окно — найти похожие на неё</div>
+          <div><kbd>Ctrl+A</kbd> выбрать всё · <kbd>Ctrl+Z</kbd> отменить</div>
+        </div>
+      </details>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header class="library-head">
+      <div class="library-heading"><span class="eyebrow">Ваша коллекция</span><h1 id="pageTitle">Все снимки</h1><p id="pageDescription">Фото и видео, собранные по дням</p></div>
+      <button id="btnFilters" class="btn" aria-expanded="false" aria-controls="filterPanel"><svg class="i"><use href="#i-sliders"/></svg>Фильтры и вид<span id="filterBadge" class="filter-badge hidden"></span></button>
+    </header>
+    <div id="welcome" class="welcome hidden">
+      <div class="welcome-card">
+        <div class="welcome-art" aria-hidden="true"><svg viewBox="0 0 380 160"><defs><linearGradient id="landscape" x2="0" y2="1"><stop stop-color="#405975"/><stop offset="1" stop-color="#202d3a"/></linearGradient></defs><g transform="translate(28 26) rotate(-9 62 55)"><rect width="124" height="110" rx="8" fill="#202832" stroke="#46515f"/><circle cx="88" cy="30" r="13" fill="#9ba9ae"/><path d="M1 95 38 48 74 86 103 65 123 91V109H1Z" fill="#394b50"/></g><g transform="translate(229 25) rotate(9 62 55)"><rect width="124" height="110" rx="8" fill="#2a2927" stroke="#56504a"/><circle cx="88" cy="30" r="14" fill="#c5a57a"/><path d="M1 85Q32 59 62 85T123 76V109H1Z" fill="#655343"/></g><g transform="translate(109 7)"><rect width="162" height="143" rx="9" fill="url(#landscape)" stroke="#708498"/><circle cx="116" cy="35" r="15" fill="#b2c4cb"/><path d="m1 117 53-73 41 54 26-32 40 51v25H1Z" fill="#657f88"/><path d="m34 71 20-27 20 27-20-9Z" fill="#d0dbdd"/><path d="m1 126 60-34 45 30 55-13v33H1Z" fill="#2c4853"/></g></svg></div>
+        <span class="eyebrow">Место для ваших воспоминаний</span>
+        <h1>Больше любимых кадров.<br>Меньше лишнего.</h1>
+        <p>Соберите фото и видео в удобную медиатеку.<br>Найдите лучшие кадры в сериях и избавьтесь от дубликатов.</p>
+        <div class="hero-actions">
+          <button id="btnOpen2" class="btn primary big"><svg class="i"><use href="#i-folder"/></svg>Выбрать папку</button>
+          <button id="btnPhone2" class="btn big"><svg class="i"><use href="#i-phone"/></svg>Подключить телефон</button>
+        </div>
+        <div class="path-row">
+          <input id="pathInput" type="text" aria-label="Путь к папке с фото" placeholder="Или вставьте путь к папке">
+          <button id="btnPathGo" class="btn">Открыть</button>
+        </div>
+        <div class="privacy-note"><svg class="i"><use href="#i-check"/></svg>Всё на вашем компьютере. Удаление — только после подтверждения.</div>
+        <div id="recentList" class="recent"></div>
+      </div>
+    </div>
+    <div id="view-grid" class="view"></div>
+    <div id="view-series" class="view hidden"></div>
+    <div id="view-dups" class="view hidden"></div>
+    <div id="view-map" class="view hidden">
+      <div id="map"></div>
+      <div id="mapSide">
+        <div class="map-head"><span id="mapCount"></span></div>
+        <div id="mapStrip"></div>
+      </div>
+    </div>
+    <div id="view-trash" class="view hidden"></div>
+    <div id="view-ai" class="view hidden"></div>
+    <div id="view-stats" class="view hidden"></div>
+    <div id="view-clean" class="view hidden"></div>
+    <div id="view-people" class="view hidden"></div>
+  </main>
+  <aside id="filterPanel" class="filter-panel hidden" aria-label="Фильтры и вид">
+    <div class="filter-panel-head"><b>Настройки медиатеки</b><button id="btnCloseFilters" class="btn icon ghost" aria-label="Закрыть фильтры"><svg class="i"><use href="#i-x"/></svg></button></div>
     <div class="sb-scroll">
       <section id="matchSec" class="sb-group hidden" data-group="match">
         <button class="sb-head" data-act="fold-group" data-fold-group="match"><svg class="i"><use href="#i-cloud"/></svg>Сверка с облаком<i class="chev"></i></button>
@@ -169,73 +248,16 @@
       </section>
     </div>
 
-    <div class="sb-foot">
-      <details class="sb-pop">
-        <summary title="Как программа находит серии похожих кадров"><svg class="i"><use href="#i-sliders"/></svg>Серии</summary>
-        <div class="pop-card">
-          <h5>Поиск серий</h5>
-          <label class="row">Пауза между кадрами, с <input type="number" id="setGap" min="1" max="600" step="1"></label>
-          <label class="row">Похожесть <span class="range-val"><input type="range" id="setDist" min="6" max="32" step="1"><span id="setDistVal" class="mono"></span></span></label>
-          <label class="row">Оставлять из серии
-            <select id="setKeep">
-              <option value="auto">авто (1–2)</option>
-              <option value="1">1 кадр</option>
-              <option value="2">2 кадра</option>
-              <option value="3">3 кадра</option>
-            </select>
-          </label>
-          <button id="btnRegroup" class="btn small wide">Пересчитать</button>
-        </div>
-      </details>
-      <details class="sb-pop keys">
-        <summary title="Горячие клавиши"><svg class="i"><use href="#i-keyboard"/></svg>Клавиши</summary>
-        <div class="pop-card">
-          <h5>Клавиши</h5>
-          <div><kbd>/</kbd> поиск · <kbd>Ctrl</kbd> + колесо — масштаб ленты</div>
-          <div><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> навигация · <kbd>Enter</kbd> открыть · <kbd>Esc</kbd> закрыть</div>
-          <div>В просмотре: <kbd>←</kbd><kbd>→</kbd> листать, <kbd>↑</kbd> оставить, <kbd>↓</kbd> удалить</div>
-          <div><kbd>P</kbd> оставить · <kbd>X</kbd>/<kbd>Del</kbd> удалить · <kbd>U</kbd> снять</div>
-          <div><kbd>S</kbd> разобрать серию · <kbd>C</kbd> сравнить выбранные</div>
-          <div><kbd>F</kbd> похожие снимки · перетащите картинку в окно — найти похожие на неё</div>
-          <div><kbd>Ctrl+A</kbd> выбрать всё · <kbd>Ctrl+Z</kbd> отменить</div>
-        </div>
-      </details>
-    </div>
   </aside>
+</div>
 
-  <main id="main">
-    <div id="welcome" class="welcome hidden">
-      <div class="welcome-card">
-        <svg class="hero-logo" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="url(#brandGrad)"/><circle cx="16" cy="16" r="7" fill="none" stroke="#fff" stroke-width="3"/><circle cx="23.5" cy="8.5" r="2" fill="#fff"/></svg>
-        <h1>Отбор фото и видео</h1>
-        <p>Откройте папку с телефона, фотоаппарата или облака. Программа найдёт серии похожих кадров и дубликаты, разложит снимки по категориям и покажет их на карте. Сами файлы не меняются, пока вы не подтвердите удаление.</p>
-        <div class="hero-actions">
-          <button id="btnOpen2" class="btn primary big"><svg class="i"><use href="#i-folder"/></svg>Выбрать папку</button>
-          <button id="btnPhone2" class="btn big"><svg class="i"><use href="#i-phone"/></svg>Подключить телефон</button>
-        </div>
-        <div class="path-row">
-          <input id="pathInput" type="text" placeholder="или вставьте путь, например D:\Фото\Телефон">
-          <button id="btnPathGo" class="btn">Открыть</button>
-        </div>
-        <div id="recentList" class="recent"></div>
-      </div>
-    </div>
-    <div id="view-grid" class="view"></div>
-    <div id="view-series" class="view hidden"></div>
-    <div id="view-dups" class="view hidden"></div>
-    <div id="view-map" class="view hidden">
-      <div id="map"></div>
-      <div id="mapSide">
-        <div class="map-head"><span id="mapCount"></span></div>
-        <div id="mapStrip"></div>
-      </div>
-    </div>
-    <div id="view-trash" class="view hidden"></div>
-    <div id="view-ai" class="view hidden"></div>
-    <div id="view-stats" class="view hidden"></div>
-    <div id="view-clean" class="view hidden"></div>
-    <div id="view-people" class="view hidden"></div>
-  </main>
+<div id="folderChooser" class="folder-chooser hidden" role="dialog" aria-modal="true" aria-labelledby="folderChooserTitle">
+  <section class="folder-chooser-card">
+    <header class="folder-chooser-head"><div><span class="eyebrow">Медиатека</span><h2 id="folderChooserTitle">Открыть папку</h2></div><button id="btnCloseFolderChooser" class="btn icon ghost" aria-label="Закрыть"><svg class="i"><use href="#i-x"/></svg></button></header>
+    <div class="folder-chooser-actions"><button id="btnPickFolder" class="btn primary"><svg class="i"><use href="#i-folder"/></svg>Выбрать новую папку…</button></div>
+    <div id="recentPickerList" class="recent-picker-list"></div>
+    <form id="folderPathForm" class="path-row" autocomplete="off"><input id="folderPathInput" type="text" aria-label="Путь к папке" placeholder="Или укажите путь к папке"><button class="btn" type="submit">Открыть</button></form>
+  </section>
 </div>
 
 <!-- Просмотр одного файла -->
