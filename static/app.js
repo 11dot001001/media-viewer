@@ -926,6 +926,7 @@ function renderSeries() {
   else if (!list.length) html += emptyHTML('Все серии разобраны 🎉', 'Снимите галочку «только неразобранные», чтобы увидеть их.');
   for (const sid of list) {
     const arr = S.series.get(sid);
+    const size = arr.reduce((sum, it) => sum + (it.sz || 0), 0);
     const span = arr[arr.length - 1].t - arr[0].t;
     const best = arr.filter(i => i.sb).length;
     const isDone = seriesDone(sid);
@@ -933,7 +934,7 @@ function renderSeries() {
     html += `<div class="card scard ${isDone ? 'done' : ''}" data-sid="${sid}" style="--sc:${seriesColor(sid)}">
       <div class="card-head"><span class="dot" style="width:10px;height:10px;border-radius:3px;background:var(--sc)"></span>
         <span class="t">${fmtDT(arr[0].t)}</span>
-        <span class="sub">${plural(arr.length, 'кадр', 'кадра', 'кадров')} за ${span < 60 ? span.toFixed(span < 10 ? 1 : 0) + ' с' : Math.round(span / 60) + ' мин'}${arr[0].cam ? ' · ' + esc(arr[0].cam) : ''}</span>
+        <span class="sub">${plural(arr.length, 'кадр', 'кадра', 'кадров')} · ${fmtSize(size)} · за ${span < 60 ? span.toFixed(span < 10 ? 1 : 0) + ' с' : Math.round(span / 60) + ' мин'}${arr[0].cam ? ' · ' + esc(arr[0].cam) : ''}</span>
         <div class="spacer"></div>
         ${isDone ? `<span class="pill ok">✓ разобрано · оставлено ${kept}</span>` : `<span class="pill">★ рекомендуется оставить ${best}</span>`}
       </div>
