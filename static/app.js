@@ -119,6 +119,7 @@ const S = {
   aiMore: false,  // «Что на снимке»: показаны все категории, а не только частые
   sort: prefs.get('sort', 'desc'), collapse: prefs.get('collapse', false), cols: prefs.get('cols', 6),
   onlyOpen: prefs.get('onlyOpen', true),
+  seriesSort: prefs.get('seriesSort', 'date'),
   folded: new Set(prefs.get('folded', [])),  // свёрнутые дни / группы ленты
   list: [], selected: new Set(), focus: null, anchor: null,
   undo: [], settings: null, trashTarget: 'recycle',
@@ -349,7 +350,13 @@ function seriesOrder() {
     if (!firstT.has(it.s) || it.t < firstT.get(it.s)) firstT.set(it.s, it.t);
   }
   const d = S.sort === 'asc' ? 1 : -1;
-  return [...firstT.keys()].sort((a, b) => (firstT.get(a) - firstT.get(b)) * d);
+  return [...firstT.keys()].sort((a, b) => {
+    if (S.seriesSort === 'count-desc' || S.seriesSort === 'count-asc') {
+      const countDiff = S.series.get(a).length - S.series.get(b).length;
+      if (countDiff) return countDiff * (S.seriesSort === 'count-asc' ? 1 : -1);
+    }
+    return (firstT.get(a) - firstT.get(b)) * d;
+  });
 }
 
 const seriesDone = sid => (S.series.get(sid) || []).every(i => i.st !== 0);
@@ -359,7 +366,7 @@ function updateCounts() {
   const set = (id, v) => { $('#cnt-' + id).textContent = v || ''; };
   set('grid', base.length);
   set('series', new Set(base.filter(i => i.s).map(i => i.s)).size);
-  set('dups', new Set(base.filter(i => i.d).map(i => i.d)).size);
+  set('dups', dupGroups().length);
   set('map', base.filter(i => i.lat != null).length);
   set('clean', cleanSections().reduce((n, sec) => n + sec.items.length, 0));
   set('people', S.people?.groups.length);
@@ -906,6 +913,13 @@ function renderSeries() {
   let html = `<div class="list-head">
     <span class="sub">${plural(order.length, 'серия', 'серии', 'серий')} · ${plural(frames, 'кадр', 'кадра', 'кадров')} · разобрано ${done}</span>
     <div class="spacer"></div>
+    <label class="row">Порядок
+      <select id="seriesSort">
+        <option value="date" ${S.seriesSort === 'date' ? 'selected' : ''}>По дате</option>
+        <option value="count-desc" ${S.seriesSort === 'count-desc' ? 'selected' : ''}>Сначала больше файлов</option>
+        <option value="count-asc" ${S.seriesSort === 'count-asc' ? 'selected' : ''}>Сначала меньше файлов</option>
+      </select>
+    </label>
     <label class="row check"><input type="checkbox" id="onlyOpen" ${S.onlyOpen ? 'checked' : ''}> только неразобранные</label>
     <button class="btn primary" data-act="start-review" ${order.length - done ? '' : 'disabled'}>Начать разбор ▶</button></div>`;
   if (!order.length) html += emptyHTML('Серий не найдено', 'Серия — это несколько похожих кадров, снятых подряд. Можно ослабить порог в «Поиске серий» слева.');
@@ -932,6 +946,7 @@ function renderSeries() {
 function dupGroups() {
   const out = [];
   for (const [gid, arr] of S.dups) {
+    if (arr.every(it => it.st === 1)) continue;
     const vis = arr.filter(it => passFilters(it, false));
     if (vis.length) out.push([gid, arr]);
   }
@@ -947,7 +962,7 @@ function renderDups() {
     <span class="sub">${plural(groups.length, 'группа', 'группы', 'групп')} · лишних копий ${extra.length} (${fmtSize(extra.reduce((s, i) => s + i.sz, 0))})</span>
     <div class="spacer"></div>
     <button class="btn primary" data-act="dup-all" ${pending.length ? '' : 'disabled'}>Во всех группах оставить ★ лучшее</button></div>`;
-  if (!groups.length) html += emptyHTML('Дубликатов не найдено', 'Точные копии ищутся по содержимому файла, похожие — по картинке (например, пересжатые мессенджером), а после анализа на странице «AI» — и копии с другой обрезкой.');
+  if (!groups.length) html += emptyHTML('Нет дубликатов для разбора', 'Группы, в которых все файлы отмечены «Оставить», скрыты. Похожие изображения и варианты обрезки — кандидаты в дубликаты: среди них могут быть разные кадры одной сцены.');
   for (const [gid, arr] of groups) {
     const exact = arr.every(i => i.dx);
     const crop = !exact && arr.some(i => i.dc);
@@ -2719,6 +2734,7 @@ function bindUI() {
   });
   main.addEventListener('change', e => {
     if (e.target.id === 'onlyOpen') { S.onlyOpen = e.target.checked; prefs.set('onlyOpen', S.onlyOpen); render(); }
+    if (e.target.id === 'seriesSort') { S.seriesSort = e.target.value; prefs.set('seriesSort', S.seriesSort); render(); }
   });
 
   // миниатюра не загрузилась — показать имя файла

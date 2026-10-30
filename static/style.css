@@ -373,6 +373,7 @@ input.switch:checked::after { transform: translateX(12px); }
 .row input[type=range] { width: 96px; }
 .row input[type=number] { width: 62px; }
 .row select { max-width: 132px; }
+#seriesSort { max-width: none; }
 .row.check { justify-content: flex-start; gap: 9px; cursor: pointer; }
 .range-val { display: flex; align-items: center; gap: 6px; }
 .range-val .mono { min-width: 18px; text-align: right; color: var(--text); }
