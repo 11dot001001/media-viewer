@@ -30,6 +30,24 @@
   --ease: cubic-bezier(.2, .7, .2, 1);
   color-scheme: dark;
 }
+
+/* События и поездки */
+.event-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0; }
+.event-toolbar [aria-pressed="true"], .event-card [aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.event-explanation { color: var(--muted); max-width: 850px; line-height: 1.7; }
+.event-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 20px; }
+.event-card { background: var(--surface-1); border: 1px solid var(--line-2); border-radius: 14px; overflow: hidden; }
+.event-card.chosen { border-color: var(--accent); }
+.event-cover { display: block; width: 100%; padding: 0; border: 0; background: var(--surface-2); aspect-ratio: 16 / 10; cursor: pointer; overflow: hidden; }
+.event-cover img { width: 100%; height: 100%; object-fit: cover; transition: transform .2s; }
+.event-cover:hover img { transform: scale(1.025); }
+.event-card-body { padding: 16px; }
+.event-origin { display: block; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.event-title { display: block; background: none; border: 0; padding: 0; text-align: left; font-size: 19px; font-weight: 600; cursor: pointer; overflow-wrap: anywhere; }
+.event-card p { color: var(--text-2); margin: 8px 0; }
+.event-card .btn { margin-top: 8px; }
+.event-name-input { display: block; width: 100%; margin-top: 8px; }
+#view-events { scrollbar-gutter: stable; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {

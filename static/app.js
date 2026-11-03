@@ -155,6 +155,7 @@ async function init() {
 }
 
 function applyState(st) {
+  if (S.root !== st.root) resetEvents();
   S.root = st.root;
   S.source = st.source;
   S.journal = st.journal || 0;
@@ -263,6 +264,7 @@ async function loadItems() {
   let items;
   try { items = await api('/api/items'); } catch (e) { toast('Не удалось загрузить список: ' + esc(e.message), true); return; }
   S.items = items;
+  E.dirty = true;
   S.byId = new Map(items.map(i => [i.id, i]));
   S.series = new Map();
   S.dups = new Map();
@@ -350,7 +352,17 @@ function seriesOrder() {
     if (!firstT.has(it.s) || it.t < firstT.get(it.s)) firstT.set(it.s, it.t);
   }
   const d = S.sort === 'asc' ? 1 : -1;
+  const sizes = new Map();
+  if (S.seriesSort === 'size-desc' || S.seriesSort === 'size-asc') {
+    for (const sid of firstT.keys()) {
+      sizes.set(sid, S.series.get(sid).reduce((sum, it) => sum + (it.sz || 0), 0));
+    }
+  }
   return [...firstT.keys()].sort((a, b) => {
+    if (sizes.size) {
+      const sizeDiff = sizes.get(a) - sizes.get(b);
+      if (sizeDiff) return sizeDiff * (S.seriesSort === 'size-asc' ? 1 : -1);
+    }
     if (S.seriesSort === 'count-desc' || S.seriesSort === 'count-asc') {
       const countDiff = S.series.get(a).length - S.series.get(b).length;
       if (countDiff) return countDiff * (S.seriesSort === 'count-asc' ? 1 : -1);
@@ -681,6 +693,7 @@ function render() {
   updateCounts();
   const pages = {
     grid: ['Все снимки', 'Фото и видео, собранные по дням'],
+    events: ['События и поездки', 'Воспоминания, собранные по времени и месту'],
     series: ['Серии', 'Сравните похожие кадры и сохраните лучшие'],
     dups: ['Дубликаты', 'Найдите повторные снимки и освободите место'],
     map: ['Карта', 'Ваша коллекция в местах и путешествиях'],
@@ -703,7 +716,7 @@ function render() {
   if (S.view === 'ai') { if (!S.root) showWelcome(false); renderAI(); return; }
   if (!S.root) { showWelcome(true); return; }
   // stats.js подключается отдельным файлом после app.js — обращаемся к нему только при отрисовке
-  ({ grid: renderGrid, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats(), clean: renderClean, people: renderPeople })[S.view]();
+  ({ grid: renderGrid, events: renderEvents, series: renderSeries, dups: renderDups, map: renderMap, trash: renderTrash, stats: () => renderStats(), clean: renderClean, people: renderPeople })[S.view]();
 }
 
 function tileHTML(it, o = {}) {
@@ -918,6 +931,8 @@ function renderSeries() {
         <option value="date" ${S.seriesSort === 'date' ? 'selected' : ''}>По дате</option>
         <option value="count-desc" ${S.seriesSort === 'count-desc' ? 'selected' : ''}>Сначала больше файлов</option>
         <option value="count-asc" ${S.seriesSort === 'count-asc' ? 'selected' : ''}>Сначала меньше файлов</option>
+        <option value="size-desc" ${S.seriesSort === 'size-desc' ? 'selected' : ''}>Сначала тяжёлые серии</option>
+        <option value="size-asc" ${S.seriesSort === 'size-asc' ? 'selected' : ''}>Сначала лёгкие серии</option>
       </select>
     </label>
     <label class="row check"><input type="checkbox" id="onlyOpen" ${S.onlyOpen ? 'checked' : ''}> только неразобранные</label>
@@ -1133,7 +1148,7 @@ async function applyStatuses(changes, { record = true, rerender = true } = {}) {
   }
   refreshTiles(changes.keys());
   updateCounts();
-  if (rerender && ['series', 'dups', 'trash', 'clean'].includes(S.view)) rerenderKeepScroll();
+  if (rerender && ['series', 'dups', 'trash', 'clean', 'events'].includes(S.view)) rerenderKeepScroll();
   try {
     for (const [st, ids] of byStatus) await api('/api/status', { ids, status: st });
   } catch (e) {
@@ -1251,7 +1266,8 @@ function markAndAdvance(st) {
 function gridKey(e) {
   const c = e.code;
   if ((e.ctrlKey || e.metaKey) && c === 'KeyZ') { e.preventDefault(); undo(); return; }
-  if (!['grid', 'trash', 'clean'].includes(S.view)) return;
+  if (!['grid', 'trash', 'clean', 'events'].includes(S.view)) return;
+  if (S.view === 'events' && !E.active) return;
   if ((e.ctrlKey || e.metaKey) && c === 'KeyA') {
     e.preventDefault();
     S.selected = new Set(S.list.map(i => i.id));
@@ -1669,6 +1685,7 @@ function applySuggestion() {
 
 // ============================================================ действия
 async function onAction(act, el) {
+  if (act.startsWith('event-')) { await eventAction(act, el); return; }
   const id = +el.dataset.id;
   switch (act) {
     // просмотрщик
@@ -2698,7 +2715,7 @@ function bindUI() {
   // Ctrl + колесо (и «щипок» на тачпаде) — сколько снимков в ряду
   let zoomAcc = 0;
   main.addEventListener('wheel', e => {
-    if (!e.ctrlKey || !['grid', 'trash'].includes(S.view)) return;
+    if (!e.ctrlKey || !['grid', 'trash', 'events'].includes(S.view)) return;
     e.preventDefault();
     zoomAcc += e.deltaY;
     if (Math.abs(zoomAcc) < 40) return;
@@ -2729,7 +2746,7 @@ function bindUI() {
   });
   main.addEventListener('dblclick', e => {
     const tile = e.target.closest('.tile');
-    if (!tile || !['grid', 'trash', 'clean'].includes(S.view)) return;
+    if (!tile || !['grid', 'trash', 'clean', 'events'].includes(S.view)) return;
     const it = S.byId.get(+tile.dataset.id);
     if (S.collapse && it.s && S.view === 'grid') openSeries(it.s); else openViewer(S.list, it.id);
   });
@@ -2848,7 +2865,7 @@ function setCols(n, point) {
   n = Math.max(2, Math.min(30, Math.round(n)));
   if (n === S.cols) return;
   const view = $('#view-' + S.view);
-  const scrollable = view && ['grid', 'trash'].includes(S.view);
+  const scrollable = view && ['grid', 'trash', 'events'].includes(S.view);
   let anchor = null, offset = 0;
   if (scrollable) {
     const r = view.getBoundingClientRect();

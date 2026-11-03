@@ -6,15 +6,18 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Literal
+from contextlib import closing
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from . import ai, gemma, matching, media, ocr, people, quality, trash
+from . import ai, events, gemma, matching, media, ocr, people, quality, trash
 from .journal import Journal
 from .library import Library
 from .phone import FolderDevice, PhoneLibrary, WpdDevice
@@ -119,7 +122,7 @@ class SettingsReq(BaseModel):
 def index():
     # к ссылкам на app.js и style.css добавляем версию файла — браузер не возьмёт старую копию из кэша
     html = (STATIC / "index.html").read_text(encoding="utf-8")
-    for name in ("app.js", "stats.js", "style.css"):
+    for name in ("app.js", "events.js", "stats.js", "style.css"):
         v = int((STATIC / name).stat().st_mtime)
         html = html.replace(f"/static/{name}\"", f"/static/{name}?v={v}\"")
     return Response(html, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-cache"})
@@ -273,6 +276,65 @@ def pick_folder():
 def items():
     # json.dumps напрямую: стандартная сериализация FastAPI на десятках тысяч записей в разы медленнее
     return Response(json.dumps(lib().list_items(), ensure_ascii=False), media_type="application/json")
+
+
+class EventEditReq(BaseModel):
+    root: str
+    mode: Literal['events', 'trips'] = 'events'
+    action: Literal['rename', 'merge', 'split', 'move', 'reset']
+    groups: list[str]
+    ids: list[int] = Field(default_factory=list)
+    name: str = Field(default='', max_length=120)
+    target: str | None = None
+
+
+@app.get('/api/events')
+def event_list(mode: Literal['events', 'trips'] = 'events'):
+    library = lib()
+    with closing(library.connect()) as c:
+        settings = events.preferences(c)
+    return dict(root=library.title, groups=events.listing(library, mode), preferences=settings)
+
+
+class EventPreferencesReq(BaseModel):
+    root: str
+    min_count: int = Field(default=10, ge=2, le=10000)
+    occasion_day: str = ''
+    occasion_name: str = Field(default='', max_length=80)
+
+
+@app.post('/api/event-settings')
+def event_settings(req: EventPreferencesReq):
+    library = lib()
+    if req.root != library.title:
+        raise HTTPException(409, 'Открыта другая медиатека.')
+    if req.occasion_day:
+        try:
+            date = datetime.strptime('2000-' + req.occasion_day, '%Y-%m-%d')
+        except ValueError as e:
+            raise HTTPException(400, 'Проверьте день и месяц памятной даты.') from e
+        req.occasion_day = date.strftime('%m-%d')
+        if not req.occasion_name.strip():
+            raise HTTPException(400, 'Введите название памятной даты.')
+    settings = dict(min_count=req.min_count, occasion_day=req.occasion_day,
+                    occasion_name=req.occasion_name.strip() if req.occasion_day else '')
+    events.save_preferences(library, settings)
+    return settings
+
+
+@app.post('/api/events')
+def event_edit(req: EventEditReq):
+    library = lib()
+    if req.root != library.title:
+        raise HTTPException(409, 'Открыта другая медиатека. Обновите список.')
+    if req.action != 'merge' and len(req.groups) != 1:
+        raise HTTPException(400, 'Выберите одно событие.')
+    if req.action in ('rename', 'merge', 'split') and not req.name.strip():
+        raise HTTPException(400, 'Введите название события.')
+    try:
+        return events.edit(library, req.mode, req.action, req.groups, req.ids, req.name.strip(), req.target)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
 
 
 @app.get("/api/item/{mid}")

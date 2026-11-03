@@ -80,6 +80,7 @@
       <nav id="views" aria-label="Разделы медиатеки">
         <span class="nav-label">Медиатека</span>
         <button data-view="grid" class="active"><svg class="i"><use href="#i-grid"/></svg>Все снимки<span class="cnt" id="cnt-grid"></span></button>
+        <button data-view="events"><svg class="i"><use href="#i-folder"/></svg>События и поездки</button>
         <button data-view="series"><svg class="i"><use href="#i-layers"/></svg>Серии<span class="cnt" id="cnt-series"></span></button>
         <button data-view="dups"><svg class="i"><use href="#i-copy"/></svg>Дубликаты<span class="cnt" id="cnt-dups"></span></button>
         <button data-view="map"><svg class="i"><use href="#i-pin"/></svg>Карта<span class="cnt" id="cnt-map"></span></button>
@@ -152,6 +153,7 @@
       </div>
     </div>
     <div id="view-grid" class="view"></div>
+    <div id="view-events" class="view hidden"></div>
     <div id="view-series" class="view hidden"></div>
     <div id="view-dups" class="view hidden"></div>
     <div id="view-map" class="view hidden">
@@ -318,6 +320,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="/static/events.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/stats.js"></script>
 </body>
