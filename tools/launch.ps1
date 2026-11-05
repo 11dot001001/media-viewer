@@ -1,5 +1,10 @@
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
+# Micromamba currently fails to read repository metadata from a non-ASCII
+# cache path on Windows, reporting misleading 'package does not exist' errors.
+if ((Get-Location).Path -match '[^\x00-\x7F]') {
+    throw 'The Windows setup tool cannot use a folder path containing non-English characters. Extract a fresh copy into F:\MediaViewer or C:\MediaViewer and run run.bat there. Do not copy the old .runtime folder. Your existing data folder can be copied separately.'
+}
 $env:PYTHONHOME = ''
 $env:PYTHONPATH = ''
 $env:PYTHONNOUSERSITE = '1'
