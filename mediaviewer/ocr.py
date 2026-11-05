@@ -39,7 +39,14 @@ class OcrManager(ai.Manager):
         super().__init__(data_dir, "ocr", {}, 2 * 1024 ** 2, lambda d: Engine())
 
     def packages_ok(self) -> bool:
-        return sys.platform == "win32" and importlib.util.find_spec("winrt.windows.media.ocr") is not None
+        if sys.platform != "win32":
+            return False
+        try:
+            return importlib.util.find_spec("winrt.windows.media.ocr") is not None
+        except ModuleNotFoundError:
+            # Looking up a dotted name imports its parents. On a fresh install
+            # winrt (or an intermediate package) is legitimately absent.
+            return False
 
     def model_ok(self) -> bool:
         return True  # модель — часть Windows
