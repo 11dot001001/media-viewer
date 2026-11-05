@@ -15,8 +15,14 @@ if (!(Test-Path $manager)) {
     Move-Item -LiteralPath "$manager.download" -Destination $manager -Force
 }
 if (!(Test-Path "$runtime/ready")) {
-    & $manager create -y --no-rc --override-channels -c conda-forge -p $prefix python=3.12 pip ffmpeg
-    if ($LASTEXITCODE) { throw 'Runtime installation failed. Please retry.' }
+    $installed = $false
+    foreach ($channel in @('https://conda.anaconda.org/conda-forge', 'https://prefix.dev/conda-forge')) {
+        Write-Host "Installing runtime from $channel ..."
+        & $manager create -y --no-rc --override-channels --repodata-ttl 0 --retry-clean-cache -c $channel -p $prefix python=3.12 pip ffmpeg
+        if ($LASTEXITCODE -eq 0) { $installed = $true; break }
+        Write-Host 'Package download or resolution failed; trying the alternate server...'
+    }
+    if (!$installed) { throw 'Cannot install runtime from either server. Check internet/proxy access to conda.anaconda.org and prefix.dev, then launch again. No manual Python installation is needed.' }
     Set-Content "$runtime/ready" '1'
 }
 & $manager run -p $prefix python tools/bootstrap.py @args

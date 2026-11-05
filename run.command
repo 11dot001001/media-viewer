@@ -20,7 +20,19 @@ if [ ! -x "$manager" ]; then
   mv "$manager.download" "$manager"
 fi
 if [ ! -f .runtime/ready ]; then
-  "$manager" create -y --no-rc --override-channels -c conda-forge -p "$prefix" python=3.12 pip ffmpeg
+  installed=false
+  for channel in https://conda.anaconda.org/conda-forge https://prefix.dev/conda-forge; do
+    echo "Installing runtime from $channel ..."
+    if "$manager" create -y --no-rc --override-channels --repodata-ttl 0 --retry-clean-cache -c "$channel" -p "$prefix" python=3.12 pip ffmpeg; then
+      installed=true
+      break
+    fi
+    echo "Package download or resolution failed; trying the alternate server..."
+  done
+  if [ "$installed" != true ]; then
+    echo "Cannot install runtime. Check internet/proxy access to conda.anaconda.org and prefix.dev."
+    false
+  fi
   echo 1 > .runtime/ready
 fi
 "$manager" run -p "$prefix" python tools/bootstrap.py "$@"
