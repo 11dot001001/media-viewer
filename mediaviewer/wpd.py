@@ -31,7 +31,7 @@ FOLDER_TYPES = {
     str(GUID("{27E2E392-A111-48E0-AB0C-E17705A05F85}")),  # WPD_CONTENT_TYPE_FOLDER
     str(GUID("{99ED0160-17FF-4C44-9D98-1D7A6F941921}")),  # WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT (хранилище)
 }
-PIDS = {"id": 2, "parent": 3, "name": 4, "ctype": 7, "size": 11, "orig": 12, "created": 18, "modified": 19}
+PIDS = {"id": 2, "parent": 3, "name": 4, "persistent": 5, "ctype": 7, "size": 11, "orig": 12, "created": 18, "modified": 19}
 
 
 class IPortableDevicePropertiesBulkCallback(IUnknown):
@@ -169,8 +169,10 @@ class Connection:
         while True:
             arr = (ctypes.c_wchar_p * 500)()
             fetched = ctypes.c_ulong(0)
-            en._IEnumPortableDeviceObjectIDs__com_Next(500, ctypes.cast(arr, ctypes.POINTER(ctypes.c_wchar_p)),
-                                                       ctypes.byref(fetched))
+            hr = en._IEnumPortableDeviceObjectIDs__com_Next(500, ctypes.cast(arr, ctypes.POINTER(ctypes.c_wchar_p)),
+                                                         ctypes.byref(fetched))
+            if hr is not None and hr not in (0, 1):  # S_OK / S_FALSE (end of enumeration)
+                raise RuntimeError(f'Не удалось прочитать список файлов телефона: HRESULT {hr & 0xffffffff:08X}')
             out += [arr[i] for i in range(fetched.value)]
             if fetched.value < 500:
                 return out
@@ -242,6 +244,35 @@ class Connection:
             return None
         r["id"] = obj_id
         return r
+
+    def one_strict(self, obj_id: str) -> dict:
+        """Deletion checks must never turn a transport/property error into absence."""
+        v = self.props.GetValues(obj_id, self.keys)
+        r = self._row(v, PK)
+        ctype = v.GetGuidValue(PK['ctype'])
+        if not r['name']:
+            raise RuntimeError('Телефон не вернул имя объекта')
+        r['folder'] = str(ctype) in FOLDER_TYPES
+        if not r['folder']:
+            r['size'] = v.GetUnsignedLargeIntegerValue(PK['size'])
+        r['id'] = obj_id
+        return r
+
+    def properties_strict(self, ids: list[str], progress=None) -> dict:
+        out = {}
+        for oid in ids:
+            out[oid] = self.one_strict(oid)
+            if progress:
+                progress(len(out))
+        return out
+
+    def identity(self, obj_id: str) -> tuple:
+        v = self.props.GetValues(obj_id, self.keys)
+        uid = v.GetStringValue(PK['persistent'])
+        parent = v.GetStringValue(PK['parent'])
+        if not uid or not parent:
+            raise RuntimeError('Телефон не предоставил устойчивый идентификатор файла')
+        return uid, parent
 
     def device_info(self) -> dict:
         keys = self._keys((2, 9, 12), _DEV)  # FIRMWARE, SERIAL, FRIENDLY_NAME

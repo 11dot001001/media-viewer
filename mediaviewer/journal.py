@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -31,6 +32,10 @@ CREATE TABLE IF NOT EXISTS cleanups(
   estimated INTEGER NOT NULL DEFAULT 0  -- восстановлено из журнала (без парных RAW/Live)
 );
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS phone_deletions(
+  id INTEGER PRIMARY KEY, at REAL, finished REAL, device TEXT, path TEXT,
+  sha1 TEXT, status TEXT NOT NULL, error TEXT
+);
 """
 
 FIELDS = ("name", "path", "source", "kind", "size", "sha1", "ts", "ts_source", "model", "width", "height",
@@ -45,11 +50,16 @@ class Journal:
             c.executescript(SCHEMA)
             self._backfill(c)
 
-    def connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def connect(self):
         c = sqlite3.connect(self.path, timeout=30)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL")
-        return c
+        try:
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode=WAL")
+            with c:
+                yield c
+        finally:
+            c.close()
 
     def record(self, rows: list[dict]) -> None:
         if not rows:
@@ -90,6 +100,20 @@ class Journal:
     def count(self) -> int:
         with self.connect() as c:
             return c.execute("SELECT COUNT(*) FROM deleted").fetchone()[0]
+
+    def begin_phone_delete(self, device, path, sha1):
+        with self.connect() as c:
+            return c.execute("INSERT INTO phone_deletions(at,device,path,sha1,status) VALUES(?,?,?,?, 'pending')",
+                             (time.time(), device, path, sha1)).lastrowid
+
+    def finish_phone_delete(self, aid, error):
+        with self.connect() as c:
+            c.execute("UPDATE phone_deletions SET finished=?,status=?,error=? WHERE id=?",
+                      (time.time(), 'unconfirmed' if error else 'confirmed', error, aid))
+
+    def phone_history(self):
+        with self.connect() as c:
+            return [dict(r) for r in c.execute('SELECT * FROM phone_deletions ORDER BY id DESC LIMIT 500')]
 
     def fingerprints(self) -> list[dict]:
         with self.connect() as c:

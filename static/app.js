@@ -1016,6 +1016,8 @@ function renderTrash() {
     ${S.source?.kind === 'folder' ? `<button class="btn" data-act="phone-find" ${all.length && !findRunning() ? '' : 'disabled'} title="Найти эти снимки на подключённом iPhone, чтобы удалить их и оттуда">${PHONE_ICON} Найти на телефоне</button>` : ''}
     <button class="btn ghost" data-act="trash-restore" ${all.length ? '' : 'disabled'}>Вернуть все</button>
     <button class="btn danger" data-act="trash-empty" ${all.length ? '' : 'disabled'}>Удалить ${all.length ? plural(all.length, 'файл', 'файла', 'файлов') : ''}${S.trashTarget === 'phone' ? ' с телефона' : ''}…</button></div>`;
+  html += journalPhoneHTML();
+  if (S.source?.kind === 'folder' && J.open && J.source !== S.root) loadJournalPhone();
   html += statsCardHTML();
   if (!S.stats) loadStats();
   const phoneSeg = checked ? `<div class="seg ph-seg">${[
@@ -1736,6 +1738,11 @@ async function onAction(act, el) {
     case 'trash-restore': applyStatuses(new Map(S.items.filter(i => i.st === 2).map(i => [i.id, 0]))); break;
     case 'trash-empty': emptyTrash(); break;
     case 'phone-find': phoneFind(); break;
+    case 'journal-search': searchJournalPhone(); break;
+    case 'journal-delete': deleteJournalPhone(); break;
+    case 'journal-history': journalPhoneHistory(); break;
+    case 'journal-more': J.limit += 100; refreshJournalPanel(); break;
+    case 'journal-filter': J.filter = el.dataset.v; J.limit = 100; refreshJournalPanel(); break;
     case 'stats-more': statsModal(); break;
     case 'pp-open': openPerson(el.dataset.key); break;
     case 'copy-text': {
@@ -1791,6 +1798,12 @@ async function emptyTrash() {
   const notInCloud = list.filter(i => !['cloud', 'deleted'].includes(i.m)).length;
   const onPhone = !phone && S.find.phase === 'done' ? list.filter(i => typeof i.ph === 'string').length : 0;
   const where = S.trashTarget === 'recycle' ? 'в <b>Корзину Windows</b>' : 'в папку <b>_rejected</b> (на этом диске нет Корзины Windows)';
+  const confirmedSource = S.root;
+  let selection;
+  try { selection = await api('/api/trash/selection'); } catch (e) { toast(esc(e.message), true); return; }
+  if (selection.source !== confirmedSource || selection.ids.length !== list.length || list.some(i => !selection.ids.includes(i.id))) {
+    toast('Список изменился. Обновите страницу и проверьте выбор.', true); return;
+  }
   const ok = await confirmModal(phone ? 'Удалить с телефона?' : 'Удалить отобранные файлы?',
     (phone
       ? `<p>С телефона будут удалены ${plural(list.length, 'файл', 'файла', 'файлов')} (${fmtSize(size)}).</p>` +
@@ -1804,7 +1817,7 @@ async function emptyTrash() {
            <img src="${thumbUrl(i)}" alt=""><span>=</span><img src="${phoneThumbUrl(i)}" alt="" onerror="this.style.visibility='hidden'">
            <small>${esc(i.ph.split('/').pop())}</small></div>`).join('')}</div>
        <label class="row check" style="margin-top:12px"><input type="checkbox" id="delPhone" checked>
-       <span>Удалить и с телефона «${esc(S.find.device || 'телефон')}» — ${plural(onPhone, 'найденный снимок', 'найденных снимка', 'найденных снимков')} вместе с Live-видео и правками</span></label>
+       <span>Удалить и с телефона «${esc(S.find.device || 'телефон')}» — ${plural(onPhone, 'найденный снимок', 'найденных снимка', 'найденных снимков')} без автоматического удаления Live-видео и правок</span></label>
        <p class="note">С телефона файлы удаляются безвозвратно (через провод нет «Недавно удалённых»), но их копии из облака останутся в Корзине Windows.</p>` : ''),
     'Удалить', true);
   if (!ok) return;
@@ -1814,7 +1827,7 @@ async function emptyTrash() {
     ? `Удаляю ${plural(onPhone, 'файл', 'файла', 'файлов')} с телефона — не отключайте и не блокируйте его…`
     : 'Удаляю…'}`, false, 24 * 3600 * 1000);
   try {
-    const r = await api('/api/trash/empty', { phone: delPhone });
+    const r = await api('/api/trash/empty', { phone: delPhone, ids: list.map(i => i.id), source: confirmedSource, token: selection.token });
     S.undo = [];
     toast(`Удалено: ${plural(r.removed, 'файл', 'файла', 'файлов')}, освобождено ${fmtSize(r.freed)}` +
       (r.phone ? `<br>С телефона удалено: ${plural(r.phone.removed, 'файл', 'файла', 'файлов')}, освобождено ${fmtSize(r.phone.freed)}` : ''));
@@ -2903,3 +2916,110 @@ function filtersChanged() {
 }
 
 init();
+
+
+// Previously deleted files: separate from the current selection trash.
+const J = { open: false, source: null, data: null, date: '', filter: 'found', limit: 100, timer: null, selected: new Set() };
+function journalBusy() {
+  return J.data?.active && ['connect', 'list', 'verify', 'match', 'deleting'].includes(J.data?.status.phase);
+}
+function journalPhoneHTML() {
+  if (S.source?.kind !== 'folder') return '';
+  const data = J.source === S.root ? J.data : null;
+  const st = data?.status || { phase: 'idle' };
+  const busy = data && journalBusy();
+  const summary = `<summary>Повторная проверка ранее удалённых файлов на iPhone${busy ? ' · выполняется…' : ''}</summary>`;
+  if (!J.open) return `<details id="journalPhone" class="journal-phone">${summary}</details>`;
+  const items = data?.items || [];
+  const visible = items.filter(i => i.state === J.filter);
+  const labels = { found: 'Найдены', not_found: 'Точное совпадение не найдено', unreadable: 'Ошибка чтения', unconfirmed: 'Удаление не подтверждено', deleted: 'Удалены', unchecked: 'Не проверены' };
+  const cards = visible.slice(0, J.limit).map(i => `<div class="pair">
+    <div class="pair-imgs">
+      <figure><img loading="lazy" src="/api/phone-journal/thumb/${i.id}" alt="Миниатюра из журнала"><figcaption>Ранее удалённый файл</figcaption></figure>
+      ${i.path && data?.active ? `<figure><img loading="lazy" src="/api/phone-journal/thumb/${i.id}?phone=true" alt="Миниатюра iPhone"><figcaption>iPhone</figcaption></figure>` : ''}
+    </div><div class="pair-meta"><b>${esc(i.name)}</b><div class="muted">${fmtSize(i.size)}${i.path ? '<br>' + esc(i.path) : ''}</div>
+    <div>${esc(labels[i.state])}</div>${i.error ? `<p class="journal-error">${esc(i.error)}</p>` : ''}
+    ${i.state === 'found' && data?.active && st.phase === 'done' && !busy ? `<label><input type="checkbox" data-journal-id="${i.id}" ${J.selected.has(i.id) ? 'checked' : ''}> Выбрать для удаления с телефона</label>` : ''}</div></div>`).join('');
+  return `<details id="journalPhone" class="journal-phone" open>
+    ${summary}
+    <p class="note">Поиск по журналу текущей папки. Восстанавливать файлы из Корзины Windows не нужно. Совпадение проверяется по содержимому; сам поиск ничего не удаляет.</p>
+    <div class="journal-controls"><label>Дата съёмки <input type="date" id="journalDate" value="${esc(J.date)}" ${busy ? 'disabled' : ''}></label>
+    <span class="muted">Без даты — весь журнал папки</span>
+    <button class="btn" data-act="journal-search" ${busy || findRunning() ? 'disabled' : ''}>${busy ? 'Выполняется…' : 'Найти ранее удалённые'}</button>
+    <button class="btn ghost" data-act="journal-history">История удаления с телефона</button></div>
+    ${st.phase !== 'idle' ? `<p role="status">${busy ? '<span class="spin"></span> ' : ''}${esc(st.message || '')} ${st.total ? `${st.done || 0} / ${st.total}` : ''}
+      ${st.checked != null ? ` · Проверено: ${st.checked}, найдено: ${st.found || 0}` : ''}</p>` : ''}
+    ${st.skipped ? `<p class="note">Без сохранённого отпечатка: ${st.skipped}. Эти файлы не проверялись.</p>` : ''}
+    ${data && !data.active && st.phase !== 'idle' ? '<p class="note">Сохранённый результат. Для удаления выполните новый поиск.</p>' : ''}
+    ${st.phase === 'error' ? `<p class="journal-error">${esc(st.message)}. Поиск или удаление не завершены.</p>` : ''}
+    ${items.length ? `<div class="seg">${Object.entries(labels).map(([k,v]) => {
+      const n = items.filter(i => i.state === k).length;
+      return n ? `<button data-act="journal-filter" data-v="${k}" class="${J.filter === k ? 'active' : ''}">${v} (${n})</button>` : '';
+    }).join('')}</div>
+    <p class="note">«Точное совпадение не найдено» не доказывает, что снимок удалён: на телефоне может быть другая версия или формат.</p>
+    <div class="pairs">${cards}</div>
+    ${visible.length > J.limit ? '<button class="btn" data-act="journal-more">Показать ещё 100</button>' : ''}
+    <button class="btn danger" data-act="journal-delete" ${busy || !data.active || st.phase !== 'done' ? 'disabled' : ''}>Удалить выбранные с телефона…</button>` : ''}
+  </details>`;
+}
+function refreshJournalPanel() {
+  const el = $('#journalPhone');
+  if (el) el.outerHTML = journalPhoneHTML();
+}
+document.addEventListener('toggle', e => {
+  if (e.target.id !== 'journalPhone' || e.target.open === J.open) return;
+  J.open = e.target.open;
+  refreshJournalPanel();
+  if (J.open) loadJournalPhone();
+}, true);
+document.addEventListener('change', e => {
+  if (e.target.id === 'journalDate') J.date = e.target.value;
+  if (e.target.dataset.journalId) {
+    const id = +e.target.dataset.journalId;
+    if (e.target.checked) J.selected.add(id); else J.selected.delete(id);
+  }
+});
+async function loadJournalPhone() {
+  clearTimeout(J.timer);
+  const source = S.root;
+  if (J.source !== source) { J.source = source; J.data = null; J.selected.clear(); }
+  try {
+    const data = await api('/api/phone-journal');
+    if (S.root !== source) return;
+    const wasDeleting = J.data?.status.phase === 'deleting';
+    if (!J.data && data.status.date) J.date = data.status.date;
+    J.data = data;
+    if (wasDeleting && data.status.phase !== 'deleting') loadStats();
+    if (data.items.some(i => i.state === 'unconfirmed')) J.filter = 'unconfirmed';
+    refreshJournalPanel();
+    if (journalBusy()) J.timer = setTimeout(loadJournalPhone, 1500);
+  } catch (e) { toast('Не удалось получить состояние проверки: ' + esc(e.message), true); }
+}
+async function searchJournalPhone() {
+  J.date = $('#journalDate')?.value || '';
+  J.selected.clear(); J.filter = 'found'; J.limit = 100;
+  try { await api('/api/phone-journal/search', { date: J.date || null }); await loadJournalPhone(); }
+  catch (e) { toast(esc(e.message), true); }
+}
+async function deleteJournalPhone() {
+  const chosen = (J.data?.items || []).filter(i => J.selected.has(i.id) && i.state === 'found');
+  if (!chosen.length) { toast('Выберите найденные файлы для удаления.'); return; }
+  const token = J.data.status.token;
+  if (!await confirmModal('Удалить выбранные файлы с iPhone?',
+    `<p>Будут удалены ${plural(chosen.length, 'файл', 'файла', 'файлов')}. С телефона удаление безвозвратное. Копии в Корзине Windows останутся.</p>
+    <ul>${chosen.map(i => `<li>${esc(i.name)} → ${esc(i.path)}</li>`).join('')}</ul>
+    <p>Удалятся только выбранные файлы, без автоматического удаления сопутствующих Live-видео и правок. Держите телефон подключённым и разблокированным.</p>`, 'Удалить с телефона', true)) return;
+  try {
+    await api('/api/phone-journal/delete', { ids: chosen.map(i => i.id), token });
+    J.selected.clear(); S.stats = null; await loadJournalPhone();
+  } catch (e) { toast(esc(e.message), true); }
+}
+async function journalPhoneHistory() {
+  try {
+    const rows = await api('/api/phone-journal/history');
+    const labels = { confirmed: 'Отсутствие файла подтверждено', unconfirmed: 'Удаление не подтверждено', pending: 'Операция не завершена; результат неизвестен' };
+    await confirmModal('История удаления с телефона',
+      '<p>Последние 500 попыток. Старые операции до появления пофайлового журнала сюда не входят.</p>' +
+      (rows.length ? `<div class="stats-hist"><table class="stats-table"><thead><tr><th>Время</th><th>Файл</th><th>Результат</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(new Date(r.at*1000).toLocaleString('ru-RU'))}</td><td>${esc(r.device)}<br>${esc(r.path)}</td><td>${esc(labels[r.status] || r.status)}${r.error ? '<br>' + esc(r.error) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<p>Попыток удаления пока нет.</p>'), 'Закрыть', false, false);
+  } catch (e) { toast(esc(e.message), true); }
+}

@@ -20,8 +20,8 @@ from pydantic import BaseModel, Field
 from . import ai, events, gemma, matching, media, ocr, people, quality, trash
 from .journal import Journal
 from .library import Library
-from .phone import FolderDevice, PhoneLibrary, WpdDevice
-from .phonefind import PhoneFinder
+from .phone import FolderDevice, PhoneLibrary, WpdDevice, PHONE_IO_LOCK
+from .phonefind import PhoneFinder, JournalPhoneFinder
 
 BASE = Path(__file__).resolve().parent.parent
 STATIC = BASE / "static"
@@ -52,6 +52,7 @@ async def no_stale_ui(request, call_next):
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _lib: Library | None = None
+_journal_finder: JournalPhoneFinder | None = None
 
 
 def lib() -> Library:
@@ -187,8 +188,84 @@ class FindReq(BaseModel):
     wide: bool = False  # поиск по дате с окном ±26 ч для не найденных
 
 
+class JournalFindReq(BaseModel):
+    date: str | None = None
+
+
+class JournalDeleteReq(BaseModel):
+    ids: list[int]
+    token: str
+
+
+@app.post('/api/phone-journal/search')
+def journal_phone_search(req: JournalFindReq):
+    global _journal_finder
+    lb = lib()
+    if lb.kind != 'folder':
+        raise HTTPException(409, 'Откройте папку, из которой удалялись файлы')
+    if (_journal_finder and _journal_finder.running) or (lb.finder and lb.finder.running):
+        raise HTTPException(409, 'Дождитесь завершения операции с телефоном')
+    if req.date:
+        try:
+            datetime.strptime(req.date, '%Y-%m-%d')
+        except ValueError:
+            raise HTTPException(400, 'Дата должна быть в формате ГГГГ-ММ-ДД')
+    if not PHONE_IO_LOCK.acquire(blocking=False):
+        raise HTTPException(409, 'Телефон занят другой операцией')
+    try:
+        _journal_finder = JournalPhoneFinder(lb, DATA, req.date)
+        _journal_finder.start()
+    finally:
+        PHONE_IO_LOCK.release()
+    return {'started': True}
+
+
+@app.get('/api/phone-journal')
+def journal_phone_state():
+    if _journal_finder and _journal_finder.lib.title == lib().title:
+        return {**_journal_finder.snapshot(), 'active': True}
+    path = DATA / 'phone-journal-search.json'
+    if path.exists():
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        if saved.get('source') == lib().title:
+            return {**saved, 'active': False}
+    return {'status': {'phase': 'idle'}, 'items': [], 'active': False}
+
+
+@app.get('/api/phone-journal/thumb/{mid}')
+def journal_phone_thumb(mid: int, phone: bool = False):
+    data = (_journal_finder.thumbs.get(mid) if _journal_finder else None) if phone else lib().journal.thumb(mid)
+    if not data:
+        raise HTTPException(404)
+    return Response(data, media_type='image/jpeg', headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/api/phone-journal/delete')
+def journal_phone_delete(req: JournalDeleteReq):
+    if not _journal_finder or _journal_finder.lib is not lib():
+        raise HTTPException(409, 'Повторите поиск в текущей папке')
+    if req.token != _journal_finder.token:
+        raise HTTPException(409, 'Результаты поиска изменились. Обновите страницу и проверьте выбор заново')
+    if not PHONE_IO_LOCK.acquire(blocking=False):
+        raise HTTPException(409, 'Телефон занят другой операцией')
+    try:
+        _journal_finder.delete_selected(req.ids)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+    finally:
+        PHONE_IO_LOCK.release()
+    return {'started': True}
+
+
+@app.get('/api/phone-journal/history')
+def journal_phone_history():
+    return lib().journal.phone_history()
+
+
 @app.post("/api/phone-find")
 def phone_find_start(req: FindReq | None = None):
+    if _journal_finder and _journal_finder.running:
+        raise HTTPException(409, 'Дождитесь завершения поиска или удаления по журналу')
     lb = lib()
     if lb.kind != "folder":
         raise HTTPException(409, "Поиск на телефоне — из корзины папки облака")
@@ -386,14 +463,31 @@ def set_settings(req: SettingsReq):
 
 class EmptyReq(BaseModel):
     phone: bool = False
+    ids: list[int]
+    source: str
+    token: str
+
+
+@app.get('/api/trash/selection')
+def trash_selection():
+    return lib().trash_selection()
 
 
 @app.post("/api/trash/empty")
 def empty_trash(req: EmptyReq | None = None):
+    lb = lib()
+    if req is None or req.source != str(lb.root):
+        raise HTTPException(409, 'Источник изменился. Обновите страницу и подтвердите удаление заново')
+    if _journal_finder and _journal_finder.running:
+        raise HTTPException(409, 'Дождитесь завершения операции по журналу')
+    if not PHONE_IO_LOCK.acquire(blocking=False):
+        raise HTTPException(409, 'Телефон занят другой операцией')
     try:
-        return lib().empty_trash(phone=bool(req and req.phone))
+        return lb.empty_trash(phone=req.phone, expected_ids=req.ids, expected_token=req.token)
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
+    finally:
+        PHONE_IO_LOCK.release()
 
 
 @app.post("/api/reveal/{mid}")

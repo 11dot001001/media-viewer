@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
 import re
 import threading
 import traceback
+import uuid
 from bisect import bisect_left, bisect_right
 
 import numpy as np
@@ -26,7 +28,7 @@ from PIL import Image
 
 from . import matching
 from .library import STATUS_REJECT
-from .phone import LIST_EXT, WpdDevice, companions, list_with_cache, phone_db
+from .phone import LIST_EXT, WpdDevice, companions, list_with_cache, phone_db, PHONE_IO_LOCK
 
 MONTH_DIR = re.compile(r"(\d{6})_")
 NEAR = 5  # с, окно первого прохода: дата на телефоне обычно совпадает с EXIF до секунды
@@ -110,6 +112,7 @@ class PhoneFinder:
         self.unreadable: set[int] = set()  # не удалось прочитать с телефона (обычно — он заблокирован)
         self.thumbs: dict[int, bytes] = {}  # id -> миниатюра, полученная с телефона
         self.extra: dict[int, list[str]] = {}  # id -> Live-видео/правки на телефоне
+        self.verified_hashes = {}
         self._thread: threading.Thread | None = None
 
     @property
@@ -119,6 +122,7 @@ class PhoneFinder:
     def start(self) -> None:
         if self.running:
             return
+        self._set(phase='connect', message='Подключение к телефону…')
         self._thread = threading.Thread(target=self._run, daemon=True, name="phone-find")
         self._thread.start()
 
@@ -126,6 +130,10 @@ class PhoneFinder:
         self.status.update(kw)
 
     def _run(self):
+        with PHONE_IO_LOCK:
+            self._run_locked()
+
+    def _run_locked(self):
         try:
             self._set(phase="connect", done=0, total=0, message="Подключение к телефону…")
             devs = WpdDevice.list_devices()
@@ -137,6 +145,7 @@ class PhoneFinder:
                 return
             d = devs[0]
             self.device = WpdDevice(d["path"], d["name"], d.get("serial"))
+            self.device.journal = self.lib.journal
             self._set(device=self.device.name)
             months = None if self.everywhere else self._months()
             self._set(scope="all" if months is None else "months", months=sorted(months or []))
@@ -151,9 +160,7 @@ class PhoneFinder:
 
     def _months(self) -> set[str]:
         """Месяцы съёмки файлов из корзины (± сутки на часовые пояса и границы месяца)."""
-        with self.lib.connect() as c:
-            rows = c.execute("SELECT ts, ts_source FROM media WHERE parent_id IS NULL AND status=?",
-                             (STATUS_REJECT,)).fetchall()
+        rows = self._items()
         months = set()
         for r in rows:
             if r["ts"] is None or r["ts_source"] == "mtime":
@@ -264,7 +271,7 @@ class PhoneFinder:
 
     @staticmethod
     def _acc() -> dict:
-        return {"found": {}, "extra": {}, "mismatch": set(), "thumbs": {}, "unreadable": set(), "broken": False}
+        return {"found": {}, "extra": {}, "mismatch": set(), "thumbs": {}, "unreadable": set(), "broken": False, "hashes": {}}
 
     def _verify(self, items, cands_of, companions_of, acc) -> None:
         """Сверить кандидатов побайтно (SHA-1 всего файла на телефоне) и записать результат в acc."""
@@ -305,12 +312,16 @@ class PhoneFinder:
                 mismatch.discard(it["id"])
                 unreadable.discard(it["id"])
                 found[it["id"]] = f[0]
-                acc["extra"][it["id"]] = companions_of(f[0])
+                acc['hashes'][it['id']] = cloud_sha
+                acc["extra"][it["id"]] = []  # related names alone must never authorize deletion
                 try:
-                    acc["thumbs"][it["id"]] = self._oriented_thumb(conn.read_thumb(oid), self.lib.thumb(it["id"]))
+                    acc["thumbs"][it["id"]] = self._oriented_thumb(conn.read_thumb(oid), self._reference_thumb(it["id"]))
                 except Exception:  # noqa: BLE001 — без миниатюры удаление всё равно защищено сверкой содержимого
                     pass
                 break
+
+    def _reference_thumb(self, mid):
+        return self.lib.thumb(mid)
 
     def _publish(self, items, acc) -> None:
         for it in items:
@@ -318,6 +329,7 @@ class PhoneFinder:
         mismatch = acc["mismatch"] - acc["unreadable"]
         self.found, self.extra, self.mismatch, self.thumbs = acc["found"], acc["extra"], mismatch, acc["thumbs"]
         self.unreadable = acc["unreadable"]
+        self.verified_hashes = acc['hashes']
         self._set(checked=len(items), found=sum(1 for v in self.found.values() if v), mismatch=len(mismatch),
                   unreadable=len(self.unreadable))
 
@@ -345,3 +357,99 @@ class PhoneFinder:
                 out.append(self.found[i])
                 out += self.extra.get(i, [])
         return out
+
+
+class JournalPhoneFinder(PhoneFinder):
+    """Repeatable search of deleted originals; never restores or deletes local files."""
+
+    def __init__(self, lib, data_dir, date: str | None = None):
+        super().__init__(lib, data_dir)
+        rows = [r for r in lib.journal.fingerprints()
+                if r['source'] == lib.title and (not date or r['name'].startswith(date))]
+        unique = {}
+        self.skipped = sum(not r['sha1'] for r in rows)
+        for r in rows:
+            if r['sha1']:
+                unique.setdefault(r['sha1'], r)
+        self.rows = list(unique.values())
+        self.date = date
+        self.token = uuid.uuid4().hex
+        self.deleted = set()
+        self.delete_errors = {}
+        self.status.update(skipped=self.skipped, date=date, candidates=len(self.rows), token=self.token)
+
+    def _items(self):
+        return self.rows
+
+    def _reference_thumb(self, mid):
+        return self.lib.journal.thumb(mid)
+
+    def _months(self):
+        if any(r['ts'] is None or r['ts_source'] == 'mtime' for r in self.rows):
+            return None
+        return super()._months()
+
+    def _search_by_date(self):
+        # Full month enumeration also finds files whose order on the phone changed.
+        return False
+
+    def _run(self):
+        if not self.rows:
+            self._set(phase='done', checked=0, found=0, message='Нет файлов с сохранённым отпечатком')
+        else:
+            super()._run()
+        self._save_report()
+
+    def snapshot(self):
+        items = []
+        for r in self.rows:
+            mid = r['id']
+            state = ('deleted' if mid in self.deleted else 'unconfirmed' if mid in self.delete_errors
+                     else 'found' if self.found.get(mid) else 'unreadable' if mid in self.unreadable
+                     else 'not_found' if self.status['phase'] == 'done' else 'unchecked')
+            items.append({'id': mid, 'name': r['name'], 'size': r['size'], 'state': state,
+                          'path': self.found.get(mid), 'error': self.delete_errors.get(mid)})
+        return {'status': dict(self.status), 'items': items, 'source': self.lib.title}
+
+    def _save_report(self):
+        path = self.data_dir / 'phone-journal-search.json'
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(self.snapshot(), ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(path)
+
+    def delete_selected(self, ids):
+        if self.running or self.status['phase'] != 'done':
+            raise RuntimeError('Дождитесь успешного завершения поиска')
+        chosen = set(ids)
+        valid = {r['id'] for r in self.rows if self.found.get(r['id'])
+                 and r['id'] not in self.deleted and r['id'] not in self.delete_errors}
+        if not chosen or not chosen <= valid:
+            raise RuntimeError('Выберите найденные файлы; после ошибки нужен повторный поиск')
+        rows = [r for r in self.rows if r['id'] in chosen]
+        self._set(phase='deleting', done=0, total=len(rows), message='Проверка и удаление с телефона')
+        self._thread = threading.Thread(target=self._delete_rows, args=(rows,), daemon=True)
+        self._thread.start()
+
+    def _delete_rows(self, rows):
+        with PHONE_IO_LOCK:
+            self.device.broken = False
+            try:
+                for n, r in enumerate(rows, 1):
+                    mid = r['id']
+                    path = self.found[mid]
+                    result = self.device.delete([path], {path: r['sha1']})
+                    error = result.get(path, 'Результат удаления не получен')
+                    if error:
+                        self.delete_errors[mid] = error
+                    else:
+                        self.deleted.add(mid)
+                        self.lib.journal.record_cleanup(self.lib.title, 'phone', 1, r['size'], self.device.name)
+                    self._set(done=n, removed=len(self.deleted), errors=len(self.delete_errors))
+                    self._save_report()
+                    if error:
+                        break
+                self._set(phase='done', message='Удаление завершено' if not self.delete_errors else 'Удаление остановлено: есть неподтверждённый результат')
+            except Exception as e:
+                self._set(phase='error', message=f'Удаление остановлено: {e}')
+            finally:
+                self._save_report()

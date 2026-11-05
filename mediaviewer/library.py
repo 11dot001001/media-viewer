@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -291,6 +292,8 @@ class Library:
             for i in range(0, len(gone), 500):
                 chunk = gone[i:i + 500]
                 q = ",".join("?" * len(chunk))
+                if self.kind == 'phone':
+                    c.execute(f"UPDATE media SET parent_id=NULL, status=0 WHERE parent_id IN ({q})", chunk)
                 c.execute(f"DELETE FROM media WHERE id IN ({q})", chunk)
                 c.execute(f"DELETE FROM thumbs WHERE id IN ({q})", chunk)
 
@@ -565,7 +568,21 @@ class Library:
                 q = ",".join("?" * len(chunk))
                 c.execute(f"UPDATE media SET status=? WHERE id IN ({q}) OR parent_id IN ({q})", (status, *chunk, *chunk))
 
-    def empty_trash(self, phone: bool = False) -> dict:
+    def trash_selection(self):
+        with self.connect() as c:
+            rows = [dict(r) for r in c.execute(
+                'SELECT * FROM media WHERE status=? OR parent_id IN (SELECT id FROM media WHERE status=?) ORDER BY id',
+                (STATUS_REJECT, STATUS_REJECT))]
+        return {'source': str(self.root), 'ids': [r['id'] for r in rows if r['parent_id'] is None],
+                'token': self._trash_token(rows)}
+
+    @staticmethod
+    def _trash_token(rows):
+        payload = [{k: r.get(k) for k in ('id', 'path', 'parent_id', 'size', 'mtime', 'sha1', 'status')}
+                   for r in sorted(rows, key=lambda r: r['id'])]
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+    def empty_trash(self, phone: bool = False, expected_ids: list[int] | None = None, expected_token: str | None = None) -> dict:
         if self.scanning:
             raise RuntimeError("Дождитесь окончания сканирования")
         if phone and (self.finder is None or self.finder.running or self.finder.device is None):
@@ -573,9 +590,14 @@ class Library:
         with self.connect() as c:
             rows = [dict(r) for r in c.execute(
                 """SELECT id, path, parent_id, kind, size, sha1, ts, ts_source, model, width, height, duration,
-                   phash, dhash, match, match_ref FROM media
+                   phash, dhash, match, match_ref, mtime, status FROM media
                    WHERE status=? OR parent_id IN (SELECT id FROM media WHERE status=?)""",
                 (STATUS_REJECT, STATUS_REJECT))]
+        if expected_token is not None and self._trash_token(rows) != expected_token:
+            raise RuntimeError('Файлы изменились после подтверждения. Обновите страницу и проверьте выбор заново')
+        actual_ids = {r['id'] for r in rows if r['parent_id'] is None}
+        if expected_ids is not None and set(expected_ids) != actual_ids:
+            raise RuntimeError('Список выбранных файлов изменился. Обновите страницу и подтвердите удаление заново')
         hashes: dict[int, str] = {}
         if phone:
             # SHA-1 каждого файла из облака: на телефоне удалим только файл с ТАКИМ ЖЕ содержимым
@@ -584,7 +606,9 @@ class Library:
                     p = self.root / r["path"]
                     try:
                         if p.is_file():
-                            hashes[r["id"]] = self._sha1(p)
+                            actual = self._sha1(p)
+                            if actual == self.finder.verified_hashes.get(r['id']):
+                                hashes[r["id"]] = actual
                     except OSError:
                         pass  # не прочитался (например, не скачан из облака) — его копию на телефоне не трогаем
         removed, errors, freed = self._remove(rows)
@@ -609,10 +633,8 @@ class Library:
                     continue
                 r1 = device.delete([main], {main: hashes[i]})
                 result.update(r1)
-                extra = [rel for rel in self.finder.extra.get(i, []) if result.get(rel, "") is not None]
-                if r1.get(main) is None and extra:
-                    # Live-видео и правки — только если сам снимок прошёл сверку и удалён
-                    result.update(device.delete(extra))
+                # Related names are not evidence of identical content. Only the
+                # explicitly matched original is sent to the phone for deletion.
                 self.finder.found.pop(i, None)
             done = [k for k, v in result.items() if v is None]
             phone_res = {"removed": len(done), "freed": sum(phone_sizes.get(k, 0) for k in done),

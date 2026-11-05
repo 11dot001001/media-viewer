@@ -1210,3 +1210,11 @@ body.welcoming .library-head { visibility: hidden; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
+
+.journal-phone { margin: 16px 0; padding: 18px; border: 1px solid var(--line-2); border-radius: 12px; }
+.journal-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.journal-error { color: var(--reject); overflow-wrap: anywhere; }
+.journal-phone .pairs { margin: 16px 0; }
+
+.journal-phone > summary { cursor: pointer; color: var(--muted); }
+.journal-phone[open] > summary { color: var(--text); font-weight: 600; margin-bottom: 14px; }

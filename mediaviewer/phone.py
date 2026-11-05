@@ -23,6 +23,7 @@ COPY_LIMIT_FILES = 1500  # больше — спрашиваем, прежде �
 COPY_LIMIT_BYTES = 10 * 1024 ** 3
 MEDIA_DIRS = ("DCIM", "Pictures", "Movies")  # Android; новые iPhone показывают папки по месяцам в корне
 LIST_EXT = media.ALL_EXT | {".aae"}  # .AAE — правки iOS, удаляются вместе со снимком
+PHONE_IO_LOCK = threading.RLock()
 
 
 # ============================================================ устройства
@@ -82,6 +83,7 @@ class WpdDevice:
             name = name or info.get("name")
             serial = serial or info.get("serial")
         self.name = name or "Телефон"
+        self.serial = serial
         self.key = "wpd-" + hashlib.sha1((serial or device_id).lower().encode()).hexdigest()[:10]
         self._ids: dict[str, tuple[str, int, str]] = {}  # rel -> (id объекта, размер, id папки)
         self.broken = False  # чтение файла для сверки сорвалось: связь с телефоном ненадёжна, дальше не удаляем
@@ -116,12 +118,12 @@ class WpdDevice:
             out: list[tuple[str, int, float, float | None]] = []
             ids: dict[str, tuple[str, int, str]] = {}
             props: dict[str, dict] = {}
-            storages = c.properties(c.children("DEVICE"))
+            storages = c.properties_strict(c.children("DEVICE"))
             frontier = [(sid, r["name"]) for sid, r in storages.items()]
             while frontier:
                 kids = [(k, fid, prefix) for fid, prefix in frontier for k in c.children(fid)]
                 total = len(kids)
-                props.update(c.properties([k for k, _, _ in kids], (lambda n: progress(n, total)) if progress else None))
+                props.update(c.properties_strict([k for k, _, _ in kids], (lambda n: progress(n, total)) if progress else None))
                 nxt = []
                 for k, fid, prefix in kids:
                     r = props.get(k)
@@ -161,18 +163,13 @@ class WpdDevice:
 
     def _checked_id(self, c, rel: str) -> tuple[str | None, str | None]:
         """ID объекта, который ТОЧНО является этим файлом (имя и размер сверены с устройством прямо сейчас)."""
-        name = rel.rsplit("/", 1)[-1]
         entry = self._ids.get(rel)
-        size = entry[1] if entry else None
-        oid = entry[0] if entry else None
-        live = c.one(oid) if oid else None
-        if not live or live["name"] != name or (size is not None and live["size"] != size):
-            oid = self._resolve(c, rel, size)
-            live = c.one(oid) if oid else None
-        if not oid or not live or live["name"] != name or (size is not None and live["size"] != size):
-            return None, "файл на телефоне не найден или изменился — не тронут"
-        if entry:
-            self._ids[rel] = (oid, entry[1], entry[2])
+        if not entry:
+            return None, 'нет в списке найденных файлов'
+        oid, live = self._verified_path(c, rel)
+        if not oid or live['folder'] or live['size'] != entry[1]:
+            return None, 'файл на телефоне не найден или изменился — не тронут'
+        self._ids[rel] = (oid, entry[1], entry[2])
         return oid, None
 
     def fetch(self, rels: list[str], dest_root: Path, progress=None) -> None:
@@ -189,52 +186,88 @@ class WpdDevice:
                 if progress:
                     progress(i)
 
+    def _verified_path(self, c, rel: str) -> tuple[str | None, dict | None]:
+        """Fresh, complete directory reads. Missing parents/ambiguous paths are errors."""
+        parts = rel.split('/')
+        parent = 'DEVICE'
+        for part in parts[:-1]:
+            rows = c.properties_strict(c.children(parent))
+            matches = [oid for oid, row in rows.items() if row['name'] == part and row['folder']]
+            if len(matches) != 1:
+                raise RuntimeError(f'Папка {part} не найдена однозначно — проверка невозможна')
+            parent = matches[0]
+        rows = c.properties_strict(c.children(parent))
+        # Verify the parent is still accessible after enumeration, even if it was empty.
+        parent_row = c.one_strict(parent)
+        if len(parts) < 2 or not parent_row['folder'] or parent_row['name'] != parts[-2]:
+            raise RuntimeError('Папка изменилась во время проверки')
+        matches = [(oid, row) for oid, row in rows.items() if row['name'] == parts[-1]]
+        if len(matches) > 1:
+            raise RuntimeError('Несколько файлов с одинаковым именем — проверка невозможна')
+        return matches[0] if matches else (None, None)
+
+    def _delete_one(self, c, rel, expected):
+        if self.broken:
+            return 'предыдущая операция не подтверждена — не тронут'
+        if rel not in self._ids:
+            self.broken = True
+            return 'нет в списке найденных на телефоне — не тронут'
+        if not expected:
+            self.broken = True
+            return 'нет проверенного отпечатка содержимого — не тронут'
+        sent = False
+        try:
+            oid, row = self._verified_path(c, rel)
+            if not oid or row['folder'] or row['size'] != self._ids[rel][1]:
+                self.broken = True
+                return 'файл не найден или изменился — не тронут'
+            identity = c.identity(oid)
+            if c.sha1(oid, row['size']) != expected:
+                self.broken = True
+                return 'содержимое не совпало — не тронут'
+            # The object may have been renumbered during the read. Recheck immediately
+            # before the destructive command, without reusing the old scan's identity.
+            live = c.one_strict(oid)
+            if (c.identity(oid) != identity or
+                    (live['name'], live['size'], live['folder']) != (row['name'], row['size'], row['folder'])):
+                self.broken = True
+                return 'объект изменился после сверки — не тронут'
+            # No cached object ID is used for the deletion or its confirmation.
+            sent = True
+            c.delete([oid])
+            after, _ = self._verified_path(c, rel)
+            if after is not None:
+                self.broken = True
+                return 'удаление не подтверждено: файл всё ещё находится на телефоне'
+            self._ids.pop(rel, None)
+            return None
+        except Exception as e:
+            self.broken = True
+            return (('удаление не подтверждено' if sent else 'ошибка проверки — не тронут') + f': {e}')
+
     def delete(self, rels: list[str], hashes: dict[str, str] | None = None) -> dict[str, str | None]:
-        """Удаление по одному файлу. Перед каждым — сверка имени и размера с устройством, а если известен
-        SHA-1 файла из облака — файл на телефоне читается целиком и сверяется. После — проверка, что файла нет.
-
-        Удаляются только файлы, которые уже есть в списке (_ids) — найденные поиском или прочитанные обходом.
-        Список заново не читается: на iPhone это полчаса. После первого сбоя чтения (self.broken) ничего
-        больше не удаляется — ни в этом вызове, ни в следующих."""
+        """Success requires a complete fresh listing without the target; errors stop the batch."""
         from . import wpd
-
-        res: dict[str, str | None] = {}
-        with self._lock:
-            c = wpd.Connection(self.device_id) if not self.broken else None  # свежее подключение
+        res = {}
+        with PHONE_IO_LOCK, self._lock:
+            try:
+                c = wpd.Connection(self.device_id) if not self.broken else None
+                if c and (not self.serial or c.device_info().get('serial') != self.serial):
+                    raise RuntimeError('Устройство изменилось или его серийный номер недоступен; повторите поиск')
+            except Exception as e:
+                c = None
+                self.broken = True
+                connection_error = str(e)
+            else:
+                connection_error = None
             for rel in rels:
-                if self.broken:
-                    res[rel] = "связь с телефоном прервалась при сверке — не тронут"
-                    continue
-                if rel not in self._ids:
-                    res[rel] = "нет в списке найденных на телефоне — не тронут"
-                    continue
-                oid, err = self._checked_id(c, rel)
-                if err:
-                    res[rel] = err
-                    continue
                 expected = (hashes or {}).get(rel)
-                if expected:
-                    try:
-                        actual = c.sha1(oid, self._ids[rel][1])
-                    except Exception as e:  # noqa: BLE001
-                        res[rel] = f"не удалось прочитать файл для сверки — не тронут ({e})"
-                        self.broken = True  # связь с телефоном может быть нарушена — дальше не идём
-                        continue
-                    if actual != expected:
-                        res[rel] = "содержимое не совпало с облаком — не тронут"
-                        continue
-                name = rel.rsplit("/", 1)[-1]
-                try:
-                    c.delete([oid])
-                except Exception as e:  # noqa: BLE001
-                    res[rel] = f"ошибка удаления: {e}"
-                    continue
-                after = c.one(oid)
-                if after is not None and after["name"] == name:
-                    res[rel] = "телефон не дал удалить файл"
-                else:
-                    res[rel] = None
-                    self._ids.pop(rel, None)
+                journal = getattr(self, 'journal', None)
+                audit_id = journal.begin_phone_delete(self.name, rel, expected) if journal else None
+                err = ('ошибка подключения — не тронут: ' + connection_error) if connection_error else self._delete_one(c, rel, expected)
+                res[rel] = err
+                if journal:
+                    journal.finish_phone_delete(audit_id, err)
         return res
 
 
@@ -285,6 +318,7 @@ class PhoneLibrary(Library):
         super().__init__(d / "mirror", data_dir, lib_dir=d)
         (d / "name.txt").write_text(device.name, encoding="utf-8")
         self.device = device
+        self.device.journal = self.journal
         self.allow_copy = False  # пользователь разрешил копировать много файлов
         self._sizes: dict[str, int] = {}
         self._taken: dict[str, float | None] = {}
@@ -297,6 +331,17 @@ class PhoneLibrary(Library):
         return "phone"
 
     # ---- сканирование
+
+    def _analyze(self, mid, rel, p, ext, kind, cloud=False):
+        info = super()._analyze(mid, rel, p, ext, kind, cloud)
+        if not cloud:
+            info['sha1'] = self._sha1(p)
+        return info
+
+    def _store(self, c, mid, info):
+        super()._store(c, mid, info)
+        if info.get('sha1'):
+            c.execute('UPDATE media SET sha1=? WHERE id=?', (info['sha1'], mid))
     def _walk(self):
         self._set(message="Чтение списка файлов с телефона…")
         lst = list_with_cache(self.device, self.db_path,
@@ -373,6 +418,13 @@ class PhoneLibrary(Library):
         return p
 
     def after_scan(self) -> None:
+        # Older indexes did not retain hashes for every locally analysed photo.
+        with self.connect() as c:
+            missing = c.execute('SELECT id,path FROM media WHERE parent_id IS NULL AND sha1 IS NULL').fetchall()
+            for row in missing:
+                local = self.root / row['path']
+                if local.is_file():
+                    c.execute('UPDATE media SET sha1=? WHERE id=?', (self._sha1(local), row['id']))
         self._set(phase="match", message="Сверка с облаком…")
         self.rematch(premark=True)
         self._prune_mirror()
@@ -432,31 +484,36 @@ class PhoneLibrary(Library):
         groups = {r["id"]: r["match"] for r in rows if r["parent_id"] is None}
         errors: list[str] = []
         to_delete: list[dict] = []
+        hashes = {}
         for r in rows:
+            if r["parent_id"] is not None:
+                errors.append(f"{r['path']}: сопутствующий файл не тронут; для удаления выберите его отдельно")
+                continue
+            if r.get("sha1"):
+                hashes[r["path"]] = r["sha1"]
+            else:
+                errors.append(f"{r['path']}: нет отпечатка на момент отбора; пересканируйте телефон — не тронут")
+                continue
             group = r["match"] if r["parent_id"] is None else groups.get(r["parent_id"])
             local = self.root / r["path"]
             if group not in ("cloud", "deleted"):
                 # Этого снимка нет в облаке: перед удалением с телефона кладём копию в Корзину Windows
                 try:
                     self.local_path(r["path"])
+                    actual_hash = self._sha1(local)
+                    if hashes.get(r["path"]) and hashes[r["path"]] != actual_hash:
+                        raise RuntimeError("локальная копия изменилась после отбора")
+                    hashes[r["path"]] = actual_hash
                     send2trash(str(local))
                 except Exception as e:  # noqa: BLE001
                     errors.append(f"{r['path']}: не удалось сохранить копию в Корзину, файл не тронут ({e})")
                     continue
             to_delete.append(r)
-        hashes = {}
-        for r in to_delete:
-            if r["parent_id"] is not None:
-                continue
-            for cand in (self.root / r["path"], Path(r["match_ref"] or "") if r.get("match_ref") else None):
-                if cand and cand.is_file() and cand.stat().st_size == self._sizes.get(r["path"], -1):
-                    hashes[r["path"]] = self._sha1(cand)
-                    break
         self.device.broken = False
         result = self.device.delete([r["path"] for r in to_delete], hashes) if to_delete else {}
         removed, freed = [], 0
         for r in to_delete:
-            err = result.get(r["path"])
+            err = result.get(r["path"], "результат удаления не получен")
             if err:
                 errors.append(f"{r['path']}: {err}")
                 continue
